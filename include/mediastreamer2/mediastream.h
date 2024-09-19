@@ -1259,6 +1259,7 @@ struct _VideoStream {
 	char *display_name;
 	void *window_id;
 	void *preview_window_id;
+	void *image_preprocessor;
 	void *video_descriptor;
 	MediaStreamDir dir; /* Not used anymore, see direction in MediaStream */
 	MSRect decode_rect; // Used for the qrcode decoder
@@ -1564,6 +1565,8 @@ MS2_PUBLIC void *video_stream_get_native_window_id(VideoStream *stream);
 MS2_PUBLIC void video_stream_set_native_window_id(VideoStream *stream, void *id);
 MS2_PUBLIC void *video_stream_create_native_preview_window_id(VideoStream *stream);
 MS2_PUBLIC void video_stream_set_native_preview_window_id(VideoStream *stream, void *id);
+MS2_PUBLIC void video_stream_set_image_preprocessor(VideoStream *stream, void *preprocessor);
+MS2_PUBLIC void *video_stream_get_image_preprocessor(VideoStream *stream);
 MS2_PUBLIC void *video_stream_get_native_preview_window_id(VideoStream *stream);
 MS2_PUBLIC void *video_stream_get_video_source_descriptor(VideoStream *stream);
 MS2_PUBLIC void video_stream_use_preview_video_window(VideoStream *stream, bool_t yesno);

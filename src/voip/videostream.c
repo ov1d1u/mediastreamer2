@@ -1517,6 +1517,19 @@ static int video_stream_start_with_source_and_output(VideoStream *stream,
 		if (stream->local_jpegwriter) {
 			ms_filter_link(stream->tee, 2, stream->local_jpegwriter, 0);
 		}
+		ms_error("video_stream_start_with_source_and_output: %p", stream->image_preprocessor);
+		if (stream->image_preprocessor != 0) {
+			ms_error("video_stream_start_with_source_and_output: source filter name: %s",
+			         ms_filter_get_name(stream->source));
+			if (ms_filter_has_method(stream->source, MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR)) {
+				ms_filter_call_method(stream->source, MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR,
+				                      &stream->image_preprocessor);
+				ms_error("video_stream_start_with_source_and_output MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR: %p",
+				         stream->image_preprocessor);
+			} else {
+				ms_error("video_stream_start_with_source_and_output: no MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR");
+			}
+		}
 	}
 
 	/* Plumb the incoming stream */
@@ -2191,6 +2204,25 @@ void *video_stream_create_native_preview_window_id(VideoStream *stream) {
 			return id;
 	}
 	return stream->preview_window_id;
+}
+
+void video_stream_set_image_preprocessor(VideoStream *stream, void *arg) {
+	ms_error("---- videostream.c video_stream_set_image_preprocessor: %p", arg);
+	stream->image_preprocessor = arg;
+	if (stream->source) {
+		ms_error("---- videostream.c ms_filter_call_method");
+		ms_filter_call_method(stream->source, MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR, &arg);
+	}
+}
+
+void *video_stream_get_image_preprocessor(VideoStream *stream) {
+	void *ip = 0;
+	if (stream->output) {
+		if (ms_filter_has_method(stream->source, MS_VIDEO_DISPLAY_GET_IMAGE_PREPROCESSOR) &&
+		    ms_filter_call_method(stream->source, MS_VIDEO_DISPLAY_GET_IMAGE_PREPROCESSOR, &ip) == 0)
+			return ip;
+	}
+	return stream->image_preprocessor;
 }
 
 void video_stream_use_preview_video_window(VideoStream *stream, bool_t yesno) {

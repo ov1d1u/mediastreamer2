@@ -1269,7 +1269,6 @@ void clear_mediastreams(MediastreamDatas *args) {
 #ifdef __ANDROID__
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *ajvm, void *reserved) {
 	ms_set_jvm(ajvm);
-
 	return JNI_VERSION_1_2;
 }
 

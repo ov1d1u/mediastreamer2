@@ -31,6 +31,12 @@ extern "C" {
 #endif
 
 void ms_set_jvm(JavaVM *vm);
+void ms_set_gJvm(JavaVM *vm);
+JavaVM *ms_get_gJvm();
+void ms_set_gClassLoader(jobject _gClassLoader);
+jobject ms_get_gClassLoader(void);
+void ms_set_gFindClassMethod(jmethodID _gFindClassMethod);
+jmethodID ms_get_gFindClassMethod(void);
 
 JavaVM *ms_get_jvm(void);
 

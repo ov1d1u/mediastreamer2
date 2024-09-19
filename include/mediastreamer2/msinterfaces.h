@@ -79,6 +79,10 @@ struct _MSVideoDisplayDecodingSupport {
 /**Sets an external native window id where the video is to be drawn */
 #define MS_VIDEO_DISPLAY_SET_NATIVE_WINDOW_ID MS_FILTER_METHOD(MSFilterVideoDisplayInterface, 4, void *)
 
+#define MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR MS_FILTER_METHOD(MSFilterVideoDisplayInterface, 5, void *)
+
+#define MS_VIDEO_DISPLAY_GET_IMAGE_PREPROCESSOR MS_FILTER_METHOD(MSFilterVideoDisplayInterface, 6, void *)
+
 /**scale factor of the local view */
 #define MS_VIDEO_DISPLAY_SET_LOCAL_VIEW_SCALEFACTOR MS_FILTER_METHOD(MSFilterVideoDisplayInterface, 5, float)
 

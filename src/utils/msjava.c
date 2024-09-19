@@ -24,6 +24,9 @@
 #include "mediastreamer2/msjava.h"
 
 static JavaVM *ms2_vm = NULL;
+static JavaVM *gJvm = NULL;
+static jobject gClassLoader;
+static jmethodID gFindClassMethod;
 
 #ifndef _WIN32
 #include <pthread.h>
@@ -57,6 +60,30 @@ void ms_set_jvm(JavaVM *vm) {
 #ifndef _WIN32
 	pthread_key_create(&jnienv_key, _android_key_cleanup);
 #endif
+}
+
+void ms_set_gJvm(JavaVM *vm) {
+	gJvm = vm;
+}
+
+JavaVM *ms_get_gJvm() {
+	return gJvm;
+}
+
+void ms_set_gClassLoader(jobject _gClassLoader) {
+	gClassLoader = _gClassLoader;
+}
+
+jobject ms_get_gClassLoader(void) {
+	return gClassLoader;
+}
+
+void ms_set_gFindClassMethod(jmethodID _gFindClassMethod) {
+	gFindClassMethod = _gFindClassMethod;
+}
+
+jmethodID ms_get_gFindClassMethod(void) {
+	return gFindClassMethod;
 }
 
 JavaVM *ms_get_jvm(void) {

@@ -82,6 +82,7 @@ struct AndroidReaderContext {
 
 	jobject androidCamera;
 	jobject previewWindow;
+	jobject imagePreprocessor;
 	jclass helperClass;
 };
 
@@ -289,6 +290,26 @@ static int video_set_native_preview_window(MSFilter *f, void *arg) {
 	return 0;
 }
 
+static int video_set_image_preprocessor(MSFilter *f, void *arg) {
+	AndroidReaderContext *d = (AndroidReaderContext *)f->data;
+
+	ms_mutex_lock(&d->mutex);
+
+	jobject ip = (jobject) * ((unsigned long *)arg);
+
+	if (ip == d->imagePreprocessor) {
+		ms_mutex_unlock(&d->mutex);
+		return 0;
+	}
+
+	JNIEnv *env = ms_get_jni_env();
+
+	jmethodID method = env->GetStaticMethodID(d->helperClass, "setImagePreprocessor", "(Ljava/lang/Object;)V");
+	env->CallStaticVoidMethod(d->helperClass, method, ip);
+
+	d->imagePreprocessor = ip;
+}
+
 static int video_get_native_preview_window(MSFilter *f, void *arg) {
 	AndroidReaderContext *d = (AndroidReaderContext *)f->data;
 	*((unsigned long *)arg) = (unsigned long)d->previewWindow;
@@ -401,6 +422,7 @@ static MSFilterMethod video_capture_methods[] = {
     {MS_FILTER_GET_PIX_FMT, &video_capture_get_pix_fmt},
     {MS_VIDEO_DISPLAY_SET_NATIVE_WINDOW_ID, &video_set_native_preview_window}, // preview is managed by capture filter
     {MS_VIDEO_DISPLAY_GET_NATIVE_WINDOW_ID, &video_get_native_preview_window},
+    {MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR, &video_set_image_preprocessor},
     {MS_VIDEO_CAPTURE_SET_DEVICE_ORIENTATION, &video_set_device_rotation},
     {MS_VIDEO_CAPTURE_SET_AUTOFOCUS, &video_capture_set_autofocus},
     {0, 0}};

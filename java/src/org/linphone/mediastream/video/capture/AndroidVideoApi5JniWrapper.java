@@ -24,6 +24,7 @@ import java.util.List;
 import org.linphone.mediastream.Log;
 import org.linphone.mediastream.Version;
 import org.linphone.mediastream.video.AndroidVideoWindowImpl;
+import org.linphone.mediastream.AndroidImagePreprocessor;
 import org.linphone.mediastream.video.capture.hwconf.AndroidCameraConfiguration;
 import org.linphone.mediastream.video.capture.hwconf.AndroidCameraConfiguration.AndroidCamera;
 
@@ -46,6 +47,8 @@ public class AndroidVideoApi5JniWrapper {
 	public static boolean isRecording = false;
 
 	public static native void putImage(long nativePtr, byte[] buffer);
+	
+	private static AndroidImagePreprocessor imagePreprocessor = null;
 
 	static public int detectCamerasCount() {
 		AndroidCamera[] cameras = AndroidCameraConfiguration.retrieveCameras();
@@ -107,6 +110,10 @@ public class AndroidVideoApi5JniWrapper {
 			camera.setPreviewCallback(new Camera.PreviewCallback() {
 				public void onPreviewFrame(byte[] data, Camera camera) {
 					if (isRecording) {
+						// TODO: Make this also work with legacy camera API
+						// if (AndroidVideoApi5JniWrapper.imagePreprocessor != null) {
+						// 	data = AndroidVideoApi5JniWrapper.imagePreprocessor.preprocessCameraFrame(data);
+						// }
 						// forward image data to JNI
 						putImage(nativePtr, data);
 					}
@@ -162,6 +169,12 @@ public class AndroidVideoApi5JniWrapper {
 			exc.printStackTrace();
 		}
 	}
+	
+	public static void setImagePreprocessor(AndroidImagePreprocessor imagePreprocessor) {
+		Log.d("mediastreamer", "setImagePreprocessor(" + imagePreprocessor + ")");
+		AndroidVideoApi5JniWrapper.imagePreprocessor = imagePreprocessor;
+	}
+	
 	//select nearest resolution equal or above requested, if none, return highest resolution from the supported list
 	protected static int[] selectNearestResolutionAvailableForCamera(int id, int requestedW, int requestedH) {
 		// inversing resolution since webcams only support landscape ones

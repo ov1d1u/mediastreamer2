@@ -38,6 +38,10 @@
 
 static AVCaptureVideoOrientation Angle2AVCaptureVideoOrientation(int deviceOrientation);
 
+@protocol IOSImagePreprocessor
+- (CMSampleBufferRef) preprocessCameraFrame:(CMSampleBufferRef) sampleBuffer;
+@end
+
 // AVCaptureVideoPreviewLayer with AVCaptureSession creation
 @interface AVCaptureVideoPreviewLayerEx : AVCaptureVideoPreviewLayer
 
@@ -89,6 +93,7 @@ static AVCaptureVideoOrientation Angle2AVCaptureVideoOrientation(int deviceOrien
 + (Class)layerClass;
 
 @property (nonatomic, retain) UIView* parentView;
+@property (nonatomic, assign) id<IOSImagePreprocessor> imagePreprocessor;
 
 @end
 
@@ -99,7 +104,7 @@ static void capture_queue_cleanup(void* p) {
 
 @implementation IOSCapture
 
-@synthesize parentView;
+@synthesize parentView, imagePreprocessor;
 
 - (id)init {
 	self = [super init];
@@ -181,7 +186,9 @@ static void capture_queue_cleanup(void* p) {
 			}
 			ms_mutex_unlock(&mutex);
 
-
+			if (self.imagePreprocessor) {
+				sampleBuffer = [self.imagePreprocessor preprocessCameraFrame:sampleBuffer];
+			}
 			frame = CMSampleBufferGetImageBuffer(sampleBuffer);
 			CVReturn status = CVPixelBufferLockBaseAddress(frame, 0);
 			if (kCVReturnSuccess != status) {
@@ -338,6 +345,7 @@ static void capture_queue_cleanup(void* p) {
 	[session removeOutput:output];
 	[output release];
 	[parentView release];
+	self.imagePreprocessor = nil;
 
 	if (bufAllocator) {
 		ms_yuv_buf_allocator_free(bufAllocator);
@@ -725,10 +733,30 @@ static int ioscapture_set_native_window(MSFilter *f, void *arg) {
 	return 0;
 }
 
+static int ioscapture_set_image_preprocessor(MSFilter *f, void *arg) {
+	id<IOSImagePreprocessor> preprocessor = *(id<IOSImagePreprocessor> *)arg;
+	
+	IOSCapture *thiz = (IOSCapture*)f->data;
+	if (thiz != NULL) {
+		DISPATCH_SYNC_MAIN(^{
+			[thiz setImagePreprocessor:preprocessor];
+		});
+	}
+	return 0;
+}
+
 static int ioscapture_get_native_window(MSFilter *f, void *arg) {
 	IOSCapture *thiz = (IOSCapture*)f->data;
 	if (thiz != NULL) {
 		arg = &thiz->parentView;
+	}
+	return 0;
+}
+
+static int ioscapture_get_image_preprocessor(MSFilter *f, void *arg) {
+	IOSCapture *thiz = (IOSCapture*)f->data;
+	if (thiz != NULL && thiz->imagePreprocessor != NULL) {
+		arg = &thiz->imagePreprocessor;
 	}
 	return 0;
 }
@@ -774,6 +802,8 @@ static MSFilterMethod methods[] = {
 	{ MS_FILTER_GET_VIDEO_SIZE, ioscapture_get_vsize	},
 	{ MS_VIDEO_DISPLAY_SET_NATIVE_WINDOW_ID, ioscapture_set_native_window },//preview is managed by capture filter
 	{ MS_VIDEO_DISPLAY_GET_NATIVE_WINDOW_ID, ioscapture_get_native_window },
+	{ MS_VIDEO_DISPLAY_SET_IMAGE_PREPROCESSOR, ioscapture_set_image_preprocessor },
+	{ MS_VIDEO_DISPLAY_GET_IMAGE_PREPROCESSOR, ioscapture_get_image_preprocessor },
 	{ MS_VIDEO_CAPTURE_SET_DEVICE_ORIENTATION, ioscapture_set_device_orientation },
 	{ MS_VIDEO_DISPLAY_SET_DEVICE_ORIENTATION, ioscapture_set_device_orientation_display },
 	{ 0, NULL }
