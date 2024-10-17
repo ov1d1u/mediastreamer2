@@ -803,6 +803,10 @@ static void configure_video_source(VideoStream *stream, bool_t skip_bitrate, boo
 		video_stream_set_native_preview_window_id(stream, stream->preview_window_id);
 	}
 
+	if (stream->image_preprocessor != 0) {
+		video_stream_set_image_preprocessor(stream, stream->image_preprocessor);
+	}
+
 	ms_filter_call_method(stream->ms.encoder, MS_VIDEO_ENCODER_GET_CONFIGURATION, &vconf);
 
 	if (vconf.required_bitrate == 0) {
