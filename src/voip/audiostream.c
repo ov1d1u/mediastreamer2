@@ -18,9 +18,9 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "bctoolbox/defs.h"
 #include "mediastreamer2/msfilter.h"
 #include "ortp/port.h"
-#include <bctoolbox/defs.h>
 
 #ifdef HAVE_CONFIG_H
 #include "mediastreamer-config.h"
@@ -44,6 +44,10 @@
 #include "mediastreamer2/msvolume.h"
 #include "private.h"
 #include <math.h>
+
+#ifdef ENABLE_BAUDOT
+#include "mediastreamer2/baudot.h"
+#endif
 
 #ifdef __ANDROID__
 #include "mediastreamer2/devices.h"
@@ -211,8 +215,7 @@ audio_stream_bundle_recv_branch_new(RtpSession *session, int mixerInputPin, Audi
 static bool_t packet_contains_muted_volume(AudioStream *as, mblk_t *mp) {
 	bool_t voice_activity = FALSE;
 
-	int new_volume =
-	    rtp_get_client_to_mixer_audio_level(mp, RTP_EXTENSION_CLIENT_TO_MIXER_AUDIO_LEVEL, &voice_activity);
+	int new_volume = rtp_get_client_to_mixer_audio_level(mp, as->client_to_mixer_extension_id, &voice_activity);
 
 	if (new_volume == RTP_AUDIO_LEVEL_NO_VOLUME || (int)ms_volume_dbov_to_dbm0(new_volume) != MS_VOLUME_DB_MUTED)
 		return FALSE;
@@ -266,13 +269,15 @@ static void on_incoming_ssrc_in_bundle(RtpSession *session, void *mp, void *s, v
 		sMid = bctbx_malloc0(midSize + 1);
 		memcpy(sMid, mid, midSize);
 		/* Check the mid in packet matches the stream's session one */
-		const char *streamMid = rtp_bundle_get_session_mid(session->bundle, stream->ms.sessions.rtp_session);
+		char *streamMid = rtp_bundle_get_session_mid(session->bundle, stream->ms.sessions.rtp_session);
 		if ((strlen(streamMid) != midSize) || (memcmp(mid, streamMid, midSize) != 0)) {
 			ms_warning("New incoming SSRC %u on session %p but packet Mid %s differs from session mid %s", ssrc,
 			           session, sMid, streamMid);
+			bctbx_free(streamMid);
 			bctbx_free(sMid);
 			return;
 		}
+		if (streamMid != NULL) bctbx_free(streamMid);
 	}
 
 	// Check the audio volume of the received packet. If the packet indicates that it is muted,
@@ -328,8 +333,11 @@ static void on_incoming_ssrc_in_bundle(RtpSession *session, void *mp, void *s, v
 }
 
 static void audio_stream_free(AudioStream *stream) {
-	if (stream->ms.local_mix_conference == TRUE) {
+	if (stream->bundled_recv_branches != NULL) {
 		bctbx_list_free_with_data(stream->bundled_recv_branches, audio_stream_bundle_recv_branch_free);
+		stream->bundled_recv_branches = NULL;
+	}
+	if (stream->ms.local_mix_conference == TRUE) {
 		rtp_session_signal_disconnect_by_callback_and_user_data(
 		    stream->ms.sessions.rtp_session, "new_incoming_ssrc_found_in_bundle", on_incoming_ssrc_in_bundle, stream);
 	}
@@ -344,6 +352,7 @@ static void audio_stream_free(AudioStream *stream) {
 	if (stream->dtmfgen != NULL) ms_filter_destroy(stream->dtmfgen);
 	if (stream->flowcontrol != NULL) ms_filter_destroy(stream->flowcontrol);
 	if (stream->plc != NULL) ms_filter_destroy(stream->plc);
+	if (stream->baudot_detector != NULL) ms_filter_destroy(stream->baudot_detector);
 	if (stream->ec != NULL) ms_filter_destroy(stream->ec);
 	if (stream->volrecv != NULL) ms_filter_destroy(stream->volrecv);
 	if (stream->volsend != NULL) ms_filter_destroy(stream->volsend);
@@ -355,6 +364,7 @@ static void audio_stream_free(AudioStream *stream) {
 	if (stream->read_resampler != NULL) ms_filter_destroy(stream->read_resampler);
 	if (stream->write_resampler != NULL) ms_filter_destroy(stream->write_resampler);
 	if (stream->dtmfgen_rtp != NULL) ms_filter_destroy(stream->dtmfgen_rtp);
+	if (stream->baudot_generator != NULL) ms_filter_destroy(stream->baudot_generator);
 	if (stream->dummy) ms_filter_destroy(stream->dummy);
 	if (stream->recv_tee) ms_filter_destroy(stream->recv_tee);
 	if (stream->recorder) ms_filter_destroy(stream->recorder);
@@ -379,10 +389,11 @@ static void audio_stream_free(AudioStream *stream) {
 
 static int dtmf_tab[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '#', 'A', 'B', 'C', 'D'};
 
-static void on_dtmf_received(BCTBX_UNUSED(RtpSession *s), uint32_t dtmf, void *user_data) {
+static void on_dtmf_received(BCTBX_UNUSED(RtpSession *s), void *dtmf_ptr, void *user_data, BCTBX_UNUSED(void *unused)) {
+	uint32_t dtmf = (uint32_t)(uintptr_t)dtmf_ptr;
 	AudioStream *stream = (AudioStream *)user_data;
 	if (dtmf > 15) {
-		ms_warning("Unsupported telephone-event type.");
+		ms_warning("Unsupported telephone-event type: %x", dtmf);
 		return;
 	}
 	ms_message("Receiving dtmf %c.", dtmf_tab[dtmf]);
@@ -397,9 +408,11 @@ static void on_dtmf_received(BCTBX_UNUSED(RtpSession *s), uint32_t dtmf, void *u
  * This is a dirty hack that works anyway.
  * It would be interesting to have something that does the job
  * more easily within the MSTicker API.
- * return TRUE if the decoder was changed, FALSE otherwise.
  */
-static bool_t audio_stream_payload_type_changed(RtpSession *session, void *data) {
+static void audio_stream_payload_type_changed(RtpSession *session,
+                                              void *data,
+                                              BCTBX_UNUSED(void *unused1),
+                                              BCTBX_UNUSED(void *unused2)) {
 	AudioStream *stream = (AudioStream *)data;
 	RtpProfile *prof = rtp_session_get_profile(session);
 	int payload = rtp_session_get_recv_payload_type(stream->ms.sessions.rtp_session);
@@ -407,7 +420,7 @@ static bool_t audio_stream_payload_type_changed(RtpSession *session, void *data)
 
 	if (stream->ms.decoder == NULL) {
 		ms_message("audio_stream_payload_type_changed(): no decoder!");
-		return FALSE;
+		return;
 	}
 
 	if (pt != NULL) {
@@ -415,14 +428,14 @@ static bool_t audio_stream_payload_type_changed(RtpSession *session, void *data)
 		/* if new payload type is Comfort Noise (CN), just do nothing */
 		if (strcasecmp(pt->mime_type, "CN") == 0) {
 			ms_message("Ignore payload type change to CN");
-			return FALSE;
+			return;
 		}
 
 		if (stream->ms.current_pt && strcasecmp(pt->mime_type, stream->ms.current_pt->mime_type) == 0 &&
 		    pt->clock_rate == stream->ms.current_pt->clock_rate) {
 			ms_message(
 			    "Ignoring payload type number change because it points to the same payload type as the current one");
-			return FALSE;
+			return;
 		}
 
 		// dec = ms_filter_create_decoder(pt->mime_type);
@@ -445,14 +458,13 @@ static bool_t audio_stream_payload_type_changed(RtpSession *session, void *data)
 			ms_filter_link(stream->ms.decoder, 0, nextFilter, 0);
 			ms_filter_preprocess(stream->ms.decoder, stream->ms.sessions.ticker);
 			stream->ms.current_pt = pt;
-			return TRUE;
+			return;
 		} else {
 			ms_error("No decoder found for %s", pt->mime_type);
 		}
 	} else {
 		ms_warning("No payload type defined with number %i", payload);
 	}
-	return FALSE;
 }
 
 /*
@@ -748,8 +760,10 @@ bool_t ms_path_ends_with(const char *path, const char *suffix) {
 }
 
 MSFilter *_ms_create_av_player(const char *filename, MSFactory *factory) {
-	if (ms_path_ends_with(filename, ".mkv")) return ms_factory_create_filter(factory, MS_MKV_PLAYER_ID);
+	if (ms_path_ends_with(filename, ".mkv") || ms_path_ends_with(filename, ".mka"))
+		return ms_factory_create_filter(factory, MS_MKV_PLAYER_ID);
 	else if (ms_path_ends_with(filename, ".wav")) return ms_factory_create_filter(factory, MS_FILE_PLAYER_ID);
+	else if (ms_path_ends_with(filename, ".smff")) return ms_factory_create_filter(factory, MS_SMFF_PLAYER_ID);
 	else ms_error("Cannot open %s, unsupported file extension", filename);
 	return NULL;
 }
@@ -980,8 +994,13 @@ static void av_recorder_handle_event(void *userdata, MSFilter *recorder, unsigne
 #endif // _MSC_VER
 
 static void setup_av_recorder(AudioStream *stream, int sample_rate, int nchannels) {
-
-	stream->av_recorder.recorder = ms_factory_create_filter(stream->ms.factory, MS_MKV_RECORDER_ID);
+	MSFilterId recorder_id = MS_MKV_RECORDER_ID;
+	if (stream->recorder_file) {
+		if (ms_path_ends_with(stream->recorder_file, ".smff")) {
+			recorder_id = MS_SMFF_RECORDER_ID;
+		}
+	}
+	stream->av_recorder.recorder = ms_factory_create_filter(stream->ms.factory, recorder_id);
 	if (stream->av_recorder.recorder) {
 		MSPinFormat pinfmt = {0};
 		stream->av_recorder.video_input = ms_factory_create_filter(stream->ms.factory, MS_ITC_SOURCE_ID);
@@ -1235,6 +1254,16 @@ static void on_voice_activity_detected_cb(void *data,
 	}
 }
 
+static void baudot_generator_character_sent_cb(void *data,
+                                               BCTBX_UNUSED(MSFilter *f),
+                                               unsigned int event_id,
+                                               BCTBX_UNUSED(void *event_arg)) {
+	AudioStream *as = (AudioStream *)data;
+	if ((as->baudot_detector != NULL) && (event_id == MS_BAUDOT_GENERATOR_CHARACTER_SENT_EVENT)) {
+		ms_filter_call_method_noarg(as->baudot_detector, MS_BAUDOT_DETECTOR_NOTIFY_CHARACTER_JUST_SENT);
+	}
+}
+
 int audio_stream_start_from_io(AudioStream *stream,
                                RtpProfile *profile,
                                const char *rem_rtp_ip,
@@ -1296,19 +1325,10 @@ int audio_stream_start_from_io(AudioStream *stream,
 		stream->dtmfgen = ms_factory_create_filter(stream->ms.factory, MS_DTMF_GEN_ID);
 	else stream->dtmfgen = NULL;
 
-/* FIXME: Temporary workaround for -Wcast-function-type. */
-#if __GNUC__ >= 8
-	_Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wcast-function-type\"")
-#endif // if __GNUC__ >= 8
-
-	    rtp_session_signal_connect(rtps, "telephone-event", (RtpCallback)on_dtmf_received, stream);
+	rtp_session_signal_connect(rtps, "telephone-event", (RtpCallback)on_dtmf_received, stream);
 	rtp_session_signal_connect(rtps, "payload_type_changed", (RtpCallback)audio_stream_payload_type_changed, stream);
 
-#if __GNUC__ >= 8
-	_Pragma("GCC diagnostic pop")
-#endif // if __GNUC__ >= 8
-
-	    if (stream->ms.state == MSStreamPreparing) {
+	if (stream->ms.state == MSStreamPreparing) {
 		/*we were using the dummy preload graph, destroy it but keep sound filters unless no soundcard is given*/
 		_audio_stream_unprepare_sound(stream, io->input.type == MSResourceSoundcard);
 	}
@@ -1384,6 +1404,14 @@ int audio_stream_start_from_io(AudioStream *stream,
 	}
 	if (tev_pt != -1) rtp_session_set_send_telephone_event_payload_type(rtps, tev_pt);
 
+	if ((stream->features & AUDIO_STREAM_FEATURE_BAUDOT) &&
+	    ((strcasecmp(pt->mime_type, "pcmu") == 0) || (strcasecmp(pt->mime_type, "pcma") == 0))) {
+		stream->baudot_generator = ms_factory_create_filter(stream->ms.factory, MS_BAUDOT_GENERATOR_ID);
+		ms_filter_add_notify_callback(stream->baudot_generator, baudot_generator_character_sent_cb, stream, TRUE);
+	} else {
+		stream->baudot_generator = NULL;
+	}
+
 	if (ms_filter_call_method(stream->ms.rtpsend, MS_FILTER_GET_SAMPLE_RATE, &sample_rate) != 0) {
 		ms_error("Sample rate is unknown for RTP side !");
 		return -1;
@@ -1415,7 +1443,8 @@ int audio_stream_start_from_io(AudioStream *stream,
 	}
 
 	/* sample rate is already set for rtpsend and rtprcv, check if we have to adjust it to */
-	/* be able to use the echo canceller wich may be limited (webrtc aecm max frequency is 16000 Hz) */
+	/* be able to use the echo canceller wich may be limited (webrtc aec3 supported frequencies are 16000, 32000 and
+	 * 48000 Hz) */
 	// First check if we need to use the echo canceller
 	// Overide feature if not requested or done at sound card level
 	if (((stream->features & AUDIO_STREAM_FEATURE_EC) && !stream->use_ec) ||
@@ -1514,6 +1543,10 @@ int audio_stream_start_from_io(AudioStream *stream,
 		ms_filter_call_method(stream->dtmfgen_rtp, MS_FILTER_SET_SAMPLE_RATE, &sample_rate);
 		ms_filter_call_method(stream->dtmfgen_rtp, MS_FILTER_SET_NCHANNELS, &nchannels);
 	}
+	if (stream->baudot_generator) {
+		ms_filter_call_method(stream->baudot_generator, MS_FILTER_SET_SAMPLE_RATE, &sample_rate);
+		ms_filter_call_method(stream->baudot_generator, MS_FILTER_SET_NCHANNELS, &nchannels);
+	}
 
 	// Do not set sample rate if the input is a file
 	if (io->input.type != MSResourceFile) {
@@ -1541,6 +1574,7 @@ int audio_stream_start_from_io(AudioStream *stream,
 		if (!stream->is_ec_delay_set && io->input.soundcard) {
 			int delay_ms = ms_snd_card_get_minimal_latency(io->input.soundcard);
 			ms_message("Setting echo canceller delay with value provided by soundcard: %i ms", delay_ms);
+			// Note: the delay is not set to WebRTC echo canceller, because it uses its own delay estimation
 			ms_filter_call_method(stream->ec, MS_ECHO_CANCELLER_SET_DELAY, &delay_ms);
 		} else {
 			ms_message("Setting echo canceller delay with value configured by application.");
@@ -1674,6 +1708,18 @@ int audio_stream_start_from_io(AudioStream *stream,
 		}
 	}
 
+	if ((stream->features & AUDIO_STREAM_FEATURE_BAUDOT) &&
+	    ((strcasecmp(pt->mime_type, "pcmu") == 0) || (strcasecmp(pt->mime_type, "pcma") == 0))) {
+		stream->baudot_detector = ms_factory_create_filter(stream->ms.factory, MS_BAUDOT_DETECTOR_ID);
+
+		if (stream->baudot_detector) {
+			ms_filter_call_method(stream->baudot_detector, MS_FILTER_SET_NCHANNELS, &nchannels);
+			ms_filter_call_method(stream->baudot_detector, MS_FILTER_SET_SAMPLE_RATE, &sample_rate);
+		}
+	} else {
+		stream->baudot_detector = NULL;
+	}
+
 	/* Create generic PLC if not handled by the decoder directly*/
 	if ((stream->features & AUDIO_STREAM_FEATURE_PLC) != 0) {
 		int decoder_have_plc = 0;
@@ -1757,6 +1803,7 @@ int audio_stream_start_from_io(AudioStream *stream,
 	if (stream->volsend) ms_connection_helper_link(&h, stream->volsend, 0, 0);
 	if (stream->vad) ms_connection_helper_link(&h, stream->vad, 0, 0);
 	if (stream->dtmfgen_rtp) ms_connection_helper_link(&h, stream->dtmfgen_rtp, 0, 0);
+	if (stream->baudot_generator) ms_connection_helper_link(&h, stream->baudot_generator, 0, 0);
 	if (stream->outbound_mixer) ms_connection_helper_link(&h, stream->outbound_mixer, 0, 0);
 	if (stream->vaddtx) ms_connection_helper_link(&h, stream->vaddtx, 0, 0);
 	if (!skip_encoder_and_decoder) ms_connection_helper_link(&h, stream->ms.encoder, 0, 0);
@@ -1772,6 +1819,7 @@ int audio_stream_start_from_io(AudioStream *stream,
 			setup_local_player(stream, sample_rate, nchannels);
 		}
 	}
+	if (stream->baudot_detector) ms_connection_helper_link(&h, stream->baudot_detector, 0, 0);
 	if (stream->plc) ms_connection_helper_link(&h, stream->plc, 0, 0);
 	if (stream->flowcontrol) ms_connection_helper_link(&h, stream->flowcontrol, 0, 0);
 	if (stream->dtmfgen) ms_connection_helper_link(&h, stream->dtmfgen, 0, 0);
@@ -1986,14 +2034,13 @@ int audio_stream_set_mixed_record_file(AudioStream *st, const char *filename) {
 }
 
 static MSFilter *get_recorder(AudioStream *stream) {
-	const char *fname = stream->recorder_file;
-	size_t len = strlen(fname);
-
-	if (strstr(fname, ".mkv") == fname + len - 4) {
+	if (stream->recorder_file &&
+	    (ms_path_ends_with(stream->recorder_file, ".mkv") || ms_path_ends_with(stream->recorder_file, ".mka") ||
+	     ms_path_ends_with(stream->recorder_file, ".smff"))) {
 		if (stream->av_recorder.recorder) {
 			return stream->av_recorder.recorder;
 		} else {
-			ms_error("Cannot record in mkv format, not supported in this build.");
+			ms_error("Cannot record in multimedia format, not supported in this build.");
 			return NULL;
 		}
 	}
@@ -2177,6 +2224,7 @@ void audio_stream_set_echo_canceller_params(AudioStream *stream, int tail_len_ms
 	if (stream->ec) {
 		if (tail_len_ms > 0) ms_filter_call_method(stream->ec, MS_ECHO_CANCELLER_SET_TAIL_LENGTH, &tail_len_ms);
 		if (delay_ms > 0) {
+			// Note: the delay is not set to WebRTC echo canceller, because it uses its own delay estimation
 			stream->is_ec_delay_set = TRUE;
 			ms_filter_call_method(stream->ec, MS_ECHO_CANCELLER_SET_DELAY, &delay_ms);
 		}
@@ -2384,13 +2432,14 @@ void audio_stream_stop(AudioStream *stream) {
 			if (stream->volsend != NULL) ms_connection_helper_unlink(&h, stream->volsend, 0, 0);
 			if (stream->vad != NULL) ms_connection_helper_unlink(&h, stream->vad, 0, 0);
 			if (stream->dtmfgen_rtp) ms_connection_helper_unlink(&h, stream->dtmfgen_rtp, 0, 0);
+			if (stream->baudot_generator) ms_connection_helper_unlink(&h, stream->baudot_generator, 0, 0);
 			if (stream->outbound_mixer) ms_connection_helper_unlink(&h, stream->outbound_mixer, 0, 0);
 			if (stream->vaddtx) ms_connection_helper_unlink(&h, stream->vaddtx, 0, 0);
 			if (stream->ms.encoder) ms_connection_helper_unlink(&h, stream->ms.encoder, 0, 0);
 			ms_connection_helper_unlink(&h, stream->ms.rtpsend, 0, -1);
 
 			/*dismantle the receiving graph*/
-			if (stream->ms.local_mix_conference == TRUE) {
+			if (stream->bundled_recv_branches != NULL) {
 				bctbx_list_for_each(stream->bundled_recv_branches, audio_stream_dismantle_bundle_recv_branch);
 			}
 			ms_connection_helper_start(&h);
@@ -2400,6 +2449,7 @@ void audio_stream_stop(AudioStream *stream) {
 				ms_connection_helper_unlink(&h, stream->local_mixer, 0, 0);
 				dismantle_local_player(stream);
 			}
+			if (stream->baudot_detector != NULL) ms_connection_helper_unlink(&h, stream->baudot_detector, 0, 0);
 			if (stream->plc != NULL) ms_connection_helper_unlink(&h, stream->plc, 0, 0);
 			if (stream->flowcontrol != NULL) ms_connection_helper_unlink(&h, stream->flowcontrol, 0, 0);
 			if (stream->dtmfgen != NULL) ms_connection_helper_unlink(&h, stream->dtmfgen, 0, 0);
@@ -2432,25 +2482,15 @@ void audio_stream_stop(AudioStream *stream) {
 		}
 	}
 	rtp_session_set_rtcp_xr_media_callbacks(stream->ms.sessions.rtp_session, NULL);
-
-/* FIXME: Temporary workaround for -Wcast-function-type. */
-#if __GNUC__ >= 8
-	_Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wcast-function-type\"")
-#endif // if __GNUC__ >= 8
-
-	    rtp_session_signal_disconnect_by_callback(stream->ms.sessions.rtp_session, "telephone-event",
-	                                              (RtpCallback)on_dtmf_received);
+	rtp_session_signal_disconnect_by_callback(stream->ms.sessions.rtp_session, "telephone-event",
+	                                          (RtpCallback)on_dtmf_received);
 	rtp_session_signal_disconnect_by_callback(stream->ms.sessions.rtp_session, "payload_type_changed",
 	                                          (RtpCallback)audio_stream_payload_type_changed);
 
-#if __GNUC__ >= 8
-	_Pragma("GCC diagnostic pop")
-#endif // if __GNUC__ >= 8
-
-	    // Before destroying the filters, pump the event queue so that pending events have a chance
-	    // to reach their listeners. When the filter are destroyed, all their pending events in the
-	    // event queue will be cancelled.
-	    evq = ms_factory_get_event_queue(stream->ms.factory);
+	// Before destroying the filters, pump the event queue so that pending events have a chance
+	// to reach their listeners. When the filter are destroyed, all their pending events in the
+	// event queue will be cancelled.
+	evq = ms_factory_get_event_queue(stream->ms.factory);
 	if (evq) ms_event_queue_pump(evq);
 	ms_factory_log_statistics(stream->ms.factory);
 	audio_stream_free(stream);
@@ -2675,4 +2715,70 @@ uint32_t audio_stream_get_send_ssrc(const AudioStream *stream) {
 
 uint32_t audio_stream_get_recv_ssrc(const AudioStream *stream) {
 	return rtp_session_get_recv_ssrc(stream->ms.sessions.rtp_session);
+}
+
+#ifndef ENABLE_BAUDOT
+static void baudot_not_enabled_warning(void) {
+	ms_warning("Mediastreamer2 has not been built with Baudot support!");
+}
+#endif
+
+void audio_stream_send_baudot_character(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(const char c)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_generator) {
+		ms_filter_call_method(stream->baudot_generator, MS_BAUDOT_GENERATOR_SEND_CHARACTER, (char *)&c);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
+}
+
+void audio_stream_send_baudot_string(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(const char *text)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_generator) {
+		ms_filter_call_method(stream->baudot_generator, MS_BAUDOT_GENERATOR_SEND_STRING, (char *)text);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
+}
+
+void audio_stream_enable_baudot_decoding(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(bool_t enabled)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_detector) {
+		ms_filter_call_method(stream->baudot_detector, MS_BAUDOT_DETECTOR_ENABLE_DECODING, &enabled);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
+}
+
+void audio_stream_set_baudot_sending_mode(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(MSBaudotMode mode)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_generator) {
+		ms_filter_call_method(stream->baudot_generator, MS_BAUDOT_GENERATOR_SET_MODE, &mode);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
+}
+
+void audio_stream_set_baudot_pause_timeout(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(uint8_t seconds)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_generator) {
+		ms_filter_call_method(stream->baudot_generator, MS_BAUDOT_GENERATOR_SET_PAUSE_TIMEOUT, &seconds);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
+}
+
+void audio_stream_enable_baudot_detection(BCTBX_UNUSED(AudioStream *stream), BCTBX_UNUSED(bool_t enabled)) {
+#ifdef ENABLE_BAUDOT
+	if (stream->baudot_detector) {
+		ms_filter_call_method(stream->baudot_detector, MS_BAUDOT_DETECTOR_ENABLE_DETECTION, &enabled);
+	}
+#else
+	baudot_not_enabled_warning();
+#endif
 }

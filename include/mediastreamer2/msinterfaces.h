@@ -183,6 +183,9 @@ typedef enum _MSRecorderState MSRecorderState;
 /** restore a previous state suppling the echo canceller config as base64 encoded string */
 #define MS_ECHO_CANCELLER_SET_STATE_STRING MS_FILTER_METHOD(MSFilterEchoCancellerInterface, 6, const char)
 
+/** retrieve echo canceller current median delay applied in milliseconds*/
+#define MS_ECHO_CANCELLER_GET_DELAY MS_FILTER_METHOD(MSFilterEchoCancellerInterface, 7, int)
+
 /** Event definitions for video decoders */
 #define MS_VIDEO_DECODER_DECODING_ERRORS MS_FILTER_EVENT_NO_ARG(MSFilterVideoDecoderInterface, 0)
 #define MS_VIDEO_DECODER_FIRST_IMAGE_DECODED MS_FILTER_EVENT_NO_ARG(MSFilterVideoDecoderInterface, 1)

@@ -38,6 +38,7 @@ extern test_suite_t sound_card_test_suite;
 extern test_suite_t adaptive_test_suite;
 extern test_suite_t audio_stream_test_suite;
 extern test_suite_t video_stream_test_suite;
+extern test_suite_t aec3_test_suite;
 extern test_suite_t qrcode_test_suite;
 extern test_suite_t framework_test_suite;
 extern test_suite_t player_test_suite;
@@ -45,12 +46,16 @@ extern test_suite_t recorder_test_suite;
 extern test_suite_t text_stream_test_suite;
 extern test_suite_t h26x_tools_test_suite;
 extern test_suite_t double_encryption_test_suite;
+extern test_suite_t smff_test_suite;
 #ifdef HAVE_PCAP
 extern test_suite_t codec_impl_test_suite;
 extern test_suite_t jitterbuffer_test_suite;
 #endif
 #if MS_HAS_ARM_NEON
 extern test_suite_t neon_test_suite;
+#endif
+#ifdef ENABLE_BAUDOT
+extern test_suite_t baudot_test_suite;
 #endif
 
 #if TARGET_OS_MAC || TARGET_OS_IPHONE

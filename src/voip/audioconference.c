@@ -37,6 +37,7 @@ struct _MSAudioConference {
 	bctbx_list_t *members; /* list of MSAudioEndpoint */
 	int nmembers;
 	MSAudioEndpoint *active_speaker;
+	uint32_t current_speaker_ssrc;
 };
 
 struct _MSAudioEndpoint {
@@ -58,8 +59,8 @@ struct _MSAudioEndpoint {
 	int player_nchannels;
 	int pin;
 	int samplerate;
-	bool_t muted;
 	MSConferenceMode conf_mode;
+	bool_t muted;
 };
 
 MSAudioConference *ms_audio_conference_new(const MSAudioConferenceParams *params, MSFactory *factory) {
@@ -83,6 +84,9 @@ MSAudioConference *ms_audio_conference_new(const MSAudioConferenceParams *params
 
 		bool_t full_packet = params->mode == MSConferenceModeRouterFullPacket ? TRUE : FALSE;
 		ms_filter_call_method(obj->mixer, MS_PACKET_ROUTER_SET_FULL_PACKET_MODE_ENABLED, &full_packet);
+
+		bool_t end_to_end_encryption = params->security_level == MSStreamSecurityLevelEndToEnd ? TRUE : FALSE;
+		ms_filter_call_method(obj->mixer, MS_PACKET_ROUTER_SET_END_TO_END_ENCRYPTION_ENABLED, &end_to_end_encryption);
 	}
 
 	return obj;
@@ -299,6 +303,12 @@ static void configure_output(MSAudioEndpoint *ep) {
 
 	MSPacketRouterPinData pd;
 	pd.input = pd.output = pd.self = ep->pin;
+	memset(pd.extension_ids, 0, sizeof(pd.extension_ids));
+
+	// Set the correct extension ids negotiated
+	// We don't do MID as it is already rewritten by the session in transfer mode
+	pd.extension_ids[RTP_EXTENSION_CLIENT_TO_MIXER_AUDIO_LEVEL] = ep->st->client_to_mixer_extension_id;
+	pd.extension_ids[RTP_EXTENSION_MIXER_TO_CLIENT_AUDIO_LEVEL] = ep->st->mixer_to_client_extension_id;
 
 	ms_filter_call_method(ep->conference->mixer, MS_PACKET_ROUTER_CONFIGURE_OUTPUT, &pd);
 }
@@ -408,6 +418,7 @@ int ms_audio_conference_get_participant_volume(MSAudioConference *obj, uint32_t 
 void ms_audio_conference_process_events(MSAudioConference *obj) {
 	const bctbx_list_t *elem;
 	MSAudioEndpoint *winner = NULL;
+	uint32_t winner_ssrc = 0;
 
 	if (obj->params.mode == MSConferenceModeRouterFullPacket) {
 		int pin = -1;
@@ -438,16 +449,43 @@ void ms_audio_conference_process_events(MSAudioConference *obj) {
 					if (max_db > audio_threshold_min_db && max_db > max_db_over_member) {
 						max_db_over_member = max_db;
 						winner = ep;
+						winner_ssrc = is_remote ? rtp_session_get_recv_ssrc(ep->st->ms.sessions.rtp_session)
+						                        : rtp_session_get_send_ssrc(ep->st->ms.sessions.rtp_session);
 					}
 				}
 			}
 		}
 	}
 
+	// Notify the active speaker
 	if (obj->active_speaker != winner && winner != NULL) {
 		ms_message("Active speaker changed: now on pin %i", winner->pin);
 		if (obj->params.active_talker_callback) obj->params.active_talker_callback(obj, winner);
 		obj->active_speaker = winner;
+	}
+
+	if (obj->params.mode == MSConferenceModeMixer && winner_ssrc != obj->current_speaker_ssrc) {
+		// Add the ssrc of the winner in the contributing sources into each of the RtpSession
+		for (elem = obj->members; elem != NULL; elem = elem->next) {
+			MSAudioEndpoint *ep = (MSAudioEndpoint *)elem->data;
+
+			// Only do it if the mixer-to-client extension is not set
+			if (ep->st == NULL || ep->st->mixer_to_client_extension_id > 0) continue;
+
+			RtpSession *session = ep->st->ms.sessions.rtp_session;
+			if (session == NULL) continue;
+
+			ortp_mutex_lock(&session->main_mutex);
+
+			rtp_session_clear_contributing_sources(session);
+
+			if (winner_ssrc > 0)
+				rtp_session_add_contributing_source(session, winner_ssrc, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+			ortp_mutex_unlock(&session->main_mutex);
+		}
+
+		obj->current_speaker_ssrc = winner_ssrc;
 	}
 }
 
@@ -527,11 +565,15 @@ void ms_audio_endpoint_destroy(MSAudioEndpoint *ep) {
 MSAudioEndpoint *ms_audio_endpoint_new_recorder(MSFactory *factory, const char *path) {
 	MSAudioEndpoint *ep = ms_audio_endpoint_new();
 
-	if (ms_path_ends_with(path, ".mkv")) {
+	if (ms_path_ends_with(path, ".mkv") || ms_path_ends_with(path, ".mka") || ms_path_ends_with(path, ".smff")) {
 		MSPinFormat pinfmt = {0};
 
 		ep->recorder_encoder = ms_factory_create_filter(factory, MS_OPUS_ENC_ID);
-		ep->recorder = ms_factory_create_filter(factory, MS_MKV_RECORDER_ID);
+		if (ms_path_ends_with(path, ".smff")) {
+			ep->recorder = ms_factory_create_filter(factory, MS_SMFF_RECORDER_ID);
+		} else {
+			ep->recorder = ms_factory_create_filter(factory, MS_MKV_RECORDER_ID);
+		}
 		ms_filter_link(ep->recorder_encoder, 0, ep->recorder, 0);
 
 		pinfmt.pin = 0;
@@ -580,12 +622,15 @@ MSAudioEndpoint *ms_audio_endpoint_new_player(MSFactory *factory, const char *pa
 	MSFileFormat format = MS_FILE_FORMAT_UNKNOWN;
 	MSAudioEndpoint *ep = ms_audio_endpoint_new();
 
-	if (ms_path_ends_with(path, ".mkv")) {
+	if (ms_path_ends_with(path, ".mkv") || ms_path_ends_with(path, ".mka")) {
 		format = MS_FILE_FORMAT_MATROSKA;
 		ep->player = ms_factory_create_filter(factory, MS_MKV_PLAYER_ID);
 	} else if (ms_path_ends_with(path, ".wav")) {
 		format = MS_FILE_FORMAT_WAVE;
 		ep->player = ms_factory_create_filter(factory, MS_FILE_PLAYER_ID);
+	} else if (ms_path_ends_with(path, ".smff")) {
+		format = MS_FILE_FORMAT_SMFF;
+		ep->player = ms_factory_create_filter(factory, MS_SMFF_PLAYER_ID);
 	} else {
 		ms_error("Unsupported audio file extension for path %s.", path);
 		ms_audio_endpoint_destroy(ep);
@@ -603,6 +648,7 @@ MSAudioEndpoint *ms_audio_endpoint_new_player(MSFactory *factory, const char *pa
 			ms_filter_call_method(ep->player, MS_FILTER_GET_SAMPLE_RATE, &ep->samplerate);
 			break;
 		case MS_FILE_FORMAT_MATROSKA:
+		case MS_FILE_FORMAT_SMFF:
 			pinfmt.pin = 1;
 			ms_filter_call_method(ep->player, MS_FILTER_GET_OUTPUT_FMT, &pinfmt);
 			if (pinfmt.fmt) {
@@ -628,6 +674,11 @@ MSAudioEndpoint *ms_audio_endpoint_new_player(MSFactory *factory, const char *pa
 	ep->in_resampler = ms_factory_create_filter(factory, MS_RESAMPLE_ID);
 	ep->out_resampler = ms_factory_create_filter(factory, MS_RESAMPLE_ID);
 	ep->mixer_in.filter = ep->player_decoder ? ep->player_decoder : ep->player;
+	/* we create a dummy recorder in order to always have something connected in output of the mixer
+	 * if the event where the player audio endpoint is the only conference member,
+	 * otherwise this will create an invalid mediastreamer2 graph */
+	ep->recorder = ms_factory_create_filter(factory, MS_VOID_SINK_ID);
+	ep->mixer_out.filter = ep->recorder;
 
 	return ep;
 }
@@ -638,7 +689,7 @@ void ms_audio_player_endpoint_set_eof_cb(MSAudioEndpoint *ep, MSFilterNotifyFunc
 
 int ms_audio_player_endpoint_start(MSAudioEndpoint *ep) {
 	MSPlayerState state;
-	if (!ep->player || ep->recorder) {
+	if (!ep->player || !ep->recorder || ep->recorder->desc->id != MS_VOID_SINK_ID) {
 		ms_error("This endpoint isn't a player endpoint.");
 		return -1;
 	}
@@ -651,7 +702,7 @@ int ms_audio_player_endpoint_start(MSAudioEndpoint *ep) {
 }
 
 int ms_audio_player_endpoint_stop(MSAudioEndpoint *ep) {
-	if (!ep->player || ep->recorder) {
+	if (!ep->player) {
 		return -1;
 	}
 	return ms_filter_call_method_noarg(ep->player, MS_PLAYER_CLOSE);

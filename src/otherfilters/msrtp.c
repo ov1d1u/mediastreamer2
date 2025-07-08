@@ -330,6 +330,7 @@ static uint32_t get_cur_timestamp(MSFilter *f, mblk_t *im) {
 	    d->dtmf ==
 	        0) { /*do not perform timestamp adjustment while a dtmf is being sent, otherwise durations are erroneous */
 		uint32_t packet_ts = mblk_get_timestamp_info(im);
+		if (d->rtp_transfer_mode) return packet_ts;
 		if (d->last_sent_time == -1) {
 			d->tsoff = curts - packet_ts;
 		} else if (d->enable_ts_adjustment) {
@@ -542,6 +543,9 @@ static mblk_t *create_packet_with_volume_data_at_intervals(MSFilter *f) {
 				    s, 8); // allocate 8 more bytes than needed so we can add an extension
 				           // header with client to mixer extension without reallocating
 			rtp_add_client_to_mixer_audio_level(header, d->client_to_mixer_extension_id, voice_activity, volume);
+			if (!d->voice_activity) { // There is no voice activity, so this is timer induced: set the ekt force flag
+				ortp_mblk_set_ekt_tag_flag(header, TRUE);
+			}
 
 			d->last_audio_level_sent_time = f->ticker->time;
 		}
@@ -655,6 +659,10 @@ static void _sender_process(MSFilter *f) {
 
 			if (d->skip == FALSE && d->mute == FALSE) {
 				header = create_packet_with_volume_data_at_intervals(f);
+				// create_packet_with_volume_data_at_intervals may set the force ekt flag
+				// when forcing the volume information on a silent source.
+				// But this information, stored in mblk_t.reserved1 is crashed when copying im meta data, save it
+				bool_t forceEKTFlag = ortp_mblk_get_ekt_tag_flag(header);
 
 				rtp_set_markbit(header, mblk_get_marker_info(im));
 
@@ -662,6 +670,11 @@ static void _sender_process(MSFilter *f) {
 
 				header->b_cont = im;
 				mblk_meta_copy(im, header);
+
+				// before sending the message to ortp, set the ekt tag flag according to the
+				// independant flag. OR with it the info saved after header creation
+				// Do it after the mblk_meta_copy as it will crash reservedX and the ekt flag is stored in reserved1
+				ortp_mblk_set_ekt_tag_flag(header, forceEKTFlag || mblk_get_independent_flag(im));
 
 				rtp_session_sendm_with_ts(s, header, timestamp);
 			} else if (d->mute == TRUE && d->skip == FALSE) {
@@ -833,6 +846,7 @@ struct ReceiverData {
 	bool_t reset_jb;
 	int mixer_to_client_extension_id;
 	int client_to_mixer_extension_id;
+	int frame_marking_extension_id;
 	bool_t rtp_transfer_mode;
 	bool_t csrc_events_enabled;
 	uint32_t last_csrc;
@@ -846,6 +860,7 @@ static void receiver_init(MSFilter *f) {
 	d->rate = 8000;
 	d->mixer_to_client_extension_id = 0;
 	d->client_to_mixer_extension_id = 0;
+	d->frame_marking_extension_id = 0;
 	d->rtp_transfer_mode = FALSE;
 	d->csrc_events_enabled = FALSE;
 	d->last_csrc = 0;
@@ -854,7 +869,7 @@ static void receiver_init(MSFilter *f) {
 
 static void receiver_postprocess(MSFilter *f) {
 	ReceiverData *d = (ReceiverData *)f->data;
-	rtp_session_reset_recvfrom(d->session);
+	if (d->session) rtp_session_reset_recvfrom(d->session);
 }
 
 static void receiver_uninit(MSFilter *f) {
@@ -890,6 +905,13 @@ static int receiver_set_client_to_mixer_extension_id(MSFilter *f, void *arg) {
 	ReceiverData *d = (ReceiverData *)f->data;
 	int *id = (int *)arg;
 	d->client_to_mixer_extension_id = *id;
+	return 0;
+}
+
+static int receiver_set_frame_marking_extension_id(MSFilter *f, void *arg) {
+	ReceiverData *d = (ReceiverData *)f->data;
+	int *id = (int *)arg;
+	d->frame_marking_extension_id = *id;
 	return 0;
 }
 
@@ -929,7 +951,9 @@ static int receiver_get_ch(MSFilter *f, void *arg) {
 
 static int receiver_reset_jitter_buffer(MSFilter *f, BCTBX_UNUSED(void *arg)) {
 	ReceiverData *d = (ReceiverData *)f->data;
+	ms_filter_lock(f);
 	d->reset_jb = TRUE;
+	ms_filter_unlock(f);
 	return 0;
 }
 
@@ -943,6 +967,10 @@ static bool_t receiver_check_payload_type(MSFilter *f, ReceiverData *d, mblk_t *
 	int ptn = rtp_get_payload_type(m);
 	PayloadType *pt;
 	if (ptn == d->current_pt) return TRUE;
+	if (d->session == NULL) {
+		ms_warning("Could not check payload type, session is not set.");
+		return -1;
+	}
 	pt = rtp_profile_get_payload(rtp_session_get_profile(d->session), ptn);
 	if (pt == NULL) {
 		ms_warning("Discarding packet with unknown payload type %i", ptn);
@@ -969,13 +997,12 @@ static bool_t receiver_check_payload_type(MSFilter *f, ReceiverData *d, mblk_t *
 
 static void receiver_check_for_extensions(MSFilter *f, mblk_t *m) {
 	ReceiverData *d = (ReceiverData *)f->data;
-	rtp_audio_level_t mtc_levels[RTP_MAX_MIXER_TO_CLIENT_AUDIO_LEVEL] = {{0}};
-	rtp_audio_level_t ctm_level;
-	bool_t voice_activity;
 	bool_t ignore_ctm = FALSE;
 
 	// Check the packet if it contains audio level extensions
 	if (d->mixer_to_client_extension_id > 0) {
+		rtp_audio_level_t mtc_levels[RTP_MAX_MIXER_TO_CLIENT_AUDIO_LEVEL] = {{0}};
+
 		if (rtp_get_mixer_to_client_audio_level(m, d->mixer_to_client_extension_id, mtc_levels) != -1) {
 			ms_filter_notify(f, MS_RTP_RECV_MIXER_TO_CLIENT_AUDIO_LEVEL_RECEIVED, mtc_levels);
 			ignore_ctm = TRUE;
@@ -984,12 +1011,24 @@ static void receiver_check_for_extensions(MSFilter *f, mblk_t *m) {
 
 	// If we received a Mixer to Client, we ignore the Client to Mixer.
 	if (d->client_to_mixer_extension_id > 0 && !ignore_ctm) {
+		rtp_audio_level_t ctm_level;
+		bool_t voice_activity;
 		int ret;
-		if ((ret = rtp_get_client_to_mixer_audio_level(m, RTP_EXTENSION_CLIENT_TO_MIXER_AUDIO_LEVEL,
-		                                               &voice_activity)) != RTP_AUDIO_LEVEL_NO_VOLUME) {
+
+		if ((ret = rtp_get_client_to_mixer_audio_level(m, d->client_to_mixer_extension_id, &voice_activity)) !=
+		    RTP_AUDIO_LEVEL_NO_VOLUME) {
 			ctm_level.csrc = rtp_get_ssrc(m);
 			ctm_level.dbov = ret;
 			ms_filter_notify(f, MS_RTP_RECV_CLIENT_TO_MIXER_AUDIO_LEVEL_RECEIVED, &ctm_level);
+		}
+	}
+
+	if (d->frame_marking_extension_id > 0) {
+		uint8_t marker;
+
+		if (rtp_get_frame_marker(m, d->frame_marking_extension_id, &marker)) {
+			mblk_set_independent_flag(m, (marker & RTP_FRAME_MARKER_INDEPENDENT));
+			mblk_set_discardable_flag(m, (marker & RTP_FRAME_MARKER_DISCARDABLE));
 		}
 	}
 }
@@ -998,12 +1037,8 @@ static void receiver_check_for_csrc_change(MSFilter *f, mblk_t *m) {
 	ReceiverData *d = (ReceiverData *)f->data;
 	uint32_t csrc = 0;
 
-	// Check first for the csrc
 	if (rtp_get_cc(m) > 0) {
 		csrc = rtp_get_csrc(m, 0);
-	} else {
-		// If there is none then use the ssrc
-		csrc = rtp_get_ssrc(m);
 	}
 
 	if (csrc != d->last_csrc) {
@@ -1019,11 +1054,13 @@ static void receiver_process(MSFilter *f) {
 
 	if (d->session == NULL) return;
 
+	ms_filter_lock(f);
 	if (d->reset_jb) {
 		ms_message("Reseting jitter buffer");
 		rtp_session_resync(d->session);
 		d->reset_jb = FALSE;
 	}
+	ms_filter_unlock(f);
 
 	if (d->starting) {
 		PayloadType *pt =
@@ -1056,6 +1093,12 @@ static void receiver_process(MSFilter *f) {
 static int get_receiver_output_fmt(MSFilter *f, void *arg) {
 	ReceiverData *d = (ReceiverData *)f->data;
 	MSPinFormat *pinFmt = (MSPinFormat *)arg;
+
+	if (d->session == NULL) {
+		ms_warning("Could not obtain output format, session is not set.");
+		return -1;
+	}
+
 	PayloadType *pt =
 	    rtp_profile_get_payload(rtp_session_get_profile(d->session), rtp_session_get_send_payload_type(d->session));
 	pinFmt->fmt = ms_factory_get_audio_format(f->factory, pt->mime_type, pt->clock_rate, pt->channels, NULL);
@@ -1079,6 +1122,7 @@ static MSFilterMethod receiver_methods[] = {
     {MS_RTP_RECV_RESET_JITTER_BUFFER, receiver_reset_jitter_buffer},
     {MS_RTP_RECV_SET_MIXER_TO_CLIENT_EXTENSION_ID, receiver_set_mixer_to_client_extension_id},
     {MS_RTP_RECV_SET_CLIENT_TO_MIXER_EXTENSION_ID, receiver_set_client_to_mixer_extension_id},
+    {MS_RTP_RECV_SET_FRAME_MARKING_EXTENSION_ID, receiver_set_frame_marking_extension_id},
     {MS_RTP_RECV_ENABLE_RTP_TRANSFER_MODE, receiver_enable_rtp_transfer_mode},
     {MS_RTP_RECV_ENABLE_CSRC_EVENTS, receiver_enable_csrc_events},
     {MS_FILTER_GET_SAMPLE_RATE, receiver_get_sr},

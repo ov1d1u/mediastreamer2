@@ -1,7 +1,7 @@
 ############################################################################
 # Copyright (c) 2010-2023 Belledonne Communications SARL.
 #
-# This file is part of mediastreamer2 
+# This file is part of mediastreamer2
 # (see https://gitlab.linphone.org/BC/public/mediastreamer2).
 #
 ############################################################################
@@ -22,7 +22,7 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-project(Mediastreamer2 VERSION 5.4.0 LANGUAGES C CXX)
+project(Mediastreamer2 VERSION 5.5.0 LANGUAGES C CXX)
 
 if(WIN32)
     if( NOT CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
@@ -87,24 +87,25 @@ cmake_dependent_option(ENABLE_GOCLEAR "Build with ZRTP GoClear message support (
 option(ENABLE_SOUND "Can be used to turn off all possible sound backends." YES)
 cmake_dependent_option(ENABLE_ALSA "Enable ALSA support." YES "ENABLE_SOUND;LINUX_OR_BSD" NO)
 cmake_dependent_option(ENABLE_ANDROIDSND "Enable Android sound support." NO "ENABLE_SOUND;ANDROID" NO)
-cmake_dependent_option(ENABLE_OPENSLES "Enable Android OpenSLES sound card support." YES "ENABLE_ANDROIDSND" NO)
 cmake_dependent_option(ENABLE_ARTSC "Enable artsc (KDE<4) sound input/output." NO "ENABLE_SOUND;LINUX_OR_BSD" NO)
 cmake_dependent_option(ENABLE_MACSND "Enable MAC OS X Audio Units sound support." ${ENABLE_MACSND_DEFAULT_VALUE} "ENABLE_SOUND;APPLE" NO)
 cmake_dependent_option(ENABLE_MACAQSND "Enable native MAC OS X Audio Queue sound support." ${ENABLE_MACAQSND_DEFAULT_VALUE} "ENABLE_SOUND;APPLE" NO)
-cmake_dependent_option(ENABLE_QSA "Enable QSA (QNX Sound Architecture) support." NO "ENABLE_SOUND" NO)
+cmake_dependent_option(ENABLE_OPENSLES "Enable Android OpenSLES sound card support." YES "ENABLE_ANDROIDSND" NO)
 # OSS is mostly deprecated in 2016, so it should not be built by default (it won't work anyway). Let user defines it
 # itself only if he REALLY needs it.
 cmake_dependent_option(ENABLE_OSS "Enable OSS support." NO "ENABLE_SOUND;LINUX_OR_BSD" NO)
 cmake_dependent_option(ENABLE_PORTAUDIO "Enable portaudio native support." NO "ENABLE_SOUND" NO)
 cmake_dependent_option(ENABLE_PULSEAUDIO "Enable pulseaudio support." YES "ENABLE_SOUND" NO)
-option(ENABLE_G726 "Build mediastreamer2 with the G726 codec." NO)
-option(ENABLE_GSM "Build mediastreamer2 with the GSM codec." YES)
+cmake_dependent_option(ENABLE_QSA "Enable QSA (QNX Sound Architecture) support." NO "ENABLE_SOUND" NO)
+option(ENABLE_BAUDOT "Enable Baudot text transmission." YES)
 option(ENABLE_BV16 "Build mediastreamer2 with the BV16 codec." YES)
+option(ENABLE_G726 "Build mediastreamer2 with the G726 codec." NO)
+option(ENABLE_G729 "Build mediastreamer2 with the G729 codec." YES)
+option(ENABLE_G729B_CNG "Build mediastreamer2 with G729 annex B cng." NO)
+option(ENABLE_GSM "Build mediastreamer2 with the GSM codec." YES)
 option(ENABLE_OPUS "Build mediastreamer2 with the OPUS codec." YES)
 option(ENABLE_SPEEX_CODEC "Build mediastreamer2 with the SPEEX codec." YES)
 option(ENABLE_SPEEX_DSP "Build mediastreamer2 with the SPEEX DSP support." YES)
-option(ENABLE_G729 "Build mediastreamer2 with the G729 codec." YES)
-option(ENABLE_G729B_CNG "Build mediastreamer2 with G729 annex B cng." NO)
 cmake_dependent_option(ENABLE_RESAMPLE "Build mediastreamer2 with the resampling capability." YES "ENABLE_SPEEX_DSP" NO)
 
 option(ENABLE_VIDEO "Build mediastreamer2 with video support." YES)
@@ -160,6 +161,7 @@ check_library_exists("dl" "dlopen" "" HAVE_DLOPEN)
 include(TestBigEndian)
 test_big_endian(WORDS_BIGENDIAN)
 
+find_package(BCToolbox 5.3.0 REQUIRED OPTIONAL_COMPONENTS tester)
 find_package(Ortp 5.3.0 REQUIRED)
 
 if(ENABLE_PCAP)
@@ -227,6 +229,12 @@ if(ENABLE_QSA)
 	find_package(QSA REQUIRED)
 	find_package(QnxAudioManager REQUIRED)
 endif()
+
+bc_find_package(ZLIB ZLIB::ZLIB zlib)
+if(ZLIB_FOUND)
+	set(HAVE_ZLIB 1)
+endif()
+
 if(ENABLE_VIDEO)
 	add_definitions(-DVIDEO_ENABLED)
 endif()
@@ -304,7 +312,7 @@ if(ENABLE_GLX)
 		set(ENABLE_GLX OFF CACHE BOOL "Enable X11+OpenGL rendering support (requires glx and glew)." FORCE)
 	endif()
 endif()
-if(NOT APPLE AND NOT ANDROID AND OPENGL_FOUND OR OpenGL_GLX_FOUND)	
+if(NOT APPLE AND NOT ANDROID AND OPENGL_FOUND OR OpenGL_GLX_FOUND)
 	find_package(GLEW REQUIRED)
 	if(NOT GLEW_FOUND)
 		message(FATAL_ERROR "Glew is missing. Mediastreamer2 need it")
@@ -417,7 +425,9 @@ if(ANDROID)
 	endif()
 endif()
 
-find_package(BCToolbox 5.3.0 REQUIRED OPTIONAL_COMPONENTS tester)
+if(ENABLE_JAVA_WRAPPER AND NOT ANDROID)
+	find_package(JNI REQUIRED)
+endif()
 
 include_directories(
 	include
@@ -585,6 +595,9 @@ endif()
 if(Aom_FOUND)
 	list(APPEND LINK_LIBS ${Aom_TARGET})
 endif()
+if(ZLIB_FOUND)
+	list(APPEND LINK_LIBS ${ZLIB_TARGET})
+endif()
 if(ENABLE_ANDROIDSND)
 	include_directories(
 		src/android
@@ -648,15 +661,6 @@ if(APPLE)
 elseif(WIN32 AND CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")#Fix error on 'vccorlib_lib_should_be_specified_before_msvcrt_lib_to_linker''
 	list(APPEND LINK_OPTIONS_DEBUG "/nodefaultlib:vccorlibd" "/nodefaultlib:msvcrtd" "vccorlibd.lib" "msvcrtd.lib")
 	list(APPEND LINK_OPTIONS_RELEASE "/nodefaultlib:vccorlib" "/nodefaultlib:msvcrt" "vccorlib.lib" "msvcrt.lib")
-endif()
-
-set(MEDIASTREAMER2_CPPFLAGS )
-if(NOT BUILD_SHARED_LIBS)
-	list(APPEND MEDIASTREAMER2_CPPFLAGS "-DMS2_STATIC")
-endif()
-if(MEDIASTREAMER2_CPPFLAGS)
-	list(REMOVE_DUPLICATES MEDIASTREAMER2_CPPFLAGS)
-	add_definitions(${MEDIASTREAMER2_CPPFLAGS})
 endif()
 
 set(STRICT_OPTIONS_CPP )

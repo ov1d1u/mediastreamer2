@@ -385,9 +385,7 @@ static void osx_gl_process(MSFilter* f) {
 static void osx_gl_uninit(MSFilter* f) {
 	OSXDisplay* thiz = (OSXDisplay*) f->data;
 	if (thiz != nil) {
-		NSAutoreleasePool *loopPool = [[NSAutoreleasePool alloc] init];
-		[thiz release];
-		[loopPool drain];
+	   [thiz performSelectorOnMainThread:@selector(release) withObject:nil waitUntilDone:FALSE];
 	}
 }
 
@@ -445,6 +443,7 @@ static int osx_gl_set_native_window_id(MSFilter* f, void* arg) {
 				thiz.autoWindow = TRUE;
 			}
 			[thiz performSelectorOnMainThread:@selector(resetContainers) withObject:nil waitUntilDone:NO];
+			if(thiz.autoWindow) [thiz performSelectorOnMainThread:@selector(createWindowIfNeeded) withObject:nil waitUntilDone:FALSE];
 			ret = 0;
 		}
 		[loopPool drain];

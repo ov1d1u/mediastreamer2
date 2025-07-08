@@ -1,7 +1,7 @@
 ############################################################################
 # Copyright (c) 2010-2023 Belledonne Communications SARL.
 #
-# This file is part of mediastreamer2 
+# This file is part of mediastreamer2
 # (see https://gitlab.linphone.org/BC/public/mediastreamer2).
 #
 ############################################################################
@@ -32,8 +32,8 @@ if(X11_Xv_FOUND)
 endif()
 
 if(WIN32)
-    # Required for htons()
-    list(APPEND MS2_LIBS_FOR_TESTER Ws2_32)
+	# Required for htons()
+	list(APPEND MS2_LIBS_FOR_TESTER Ws2_32)
 endif()
 
 if(SpeexDSP_FOUND)
@@ -45,10 +45,20 @@ if(TurboJpeg_FOUND)
 	list(APPEND MS2_LIBS_FOR_TESTER ${TurboJpeg_TARGET})
 endif()
 
+
+if(ZLIB_FOUND)
+	list(APPEND MS2_LIBS_FOR_TESTER ${ZLIB_TARGET})
+endif()
+
 set(SOUND_FILES
 	sounds/arpeggio_8000_mono.wav
 	sounds/bird_44100_stereo.wav
 	sounds/chimes_48000_stereo.wav
+	sounds/echo_delay_change.wav	
+	sounds/echo_double_talk.wav
+	sounds/echo_simple_talk.wav
+	sounds/farend_double_talk.wav
+	sounds/farend_simple_talk.wav
 	sounds/hello8000.wav
 	sounds/hello8000-1s.wav
 	sounds/hello16000.wav
@@ -56,6 +66,8 @@ set(SOUND_FILES
 	sounds/hello_opus.mka
 	sounds/hello_pcmu.mka
 	sounds/laserrocket_16000_mono.wav
+	sounds/nearend_double_talk.wav
+	sounds/nearend_simple_talk.wav
 	sounds/nylon_48000_mono.wav
 	sounds/owl_44100_mono.wav
 	sounds/piano_8000_stereo.wav
@@ -68,6 +80,7 @@ set(SOUND_FILES
 	sounds/test_silence_voice_32000.wav
 	sounds/test_silence_voice_16000.wav
 	sounds/test_silence_voice_8000.wav
+	sounds/white_noise.wav
 )
 
 set(SCENARIO_FILES
@@ -112,6 +125,7 @@ set(IOS_RESOURCES_FILES
 
 set(SOURCE_FILES_C
 	mediastreamer2_adaptive_tester.c
+	mediastreamer2_aec3_tester.c
 	mediastreamer2_audio_stream_tester.c
 	mediastreamer2_basic_audio_tester.c
 	mediastreamer2_framework_tester.c
@@ -132,6 +146,11 @@ set(SOURCE_FILES_CXX
 	mediastreamer2_double_encryption_tester.cpp
 	mediastreamer2_tester_utils.cpp
 )
+
+if(ZLIB_FOUND)
+	list(APPEND SOURCE_FILES_CXX smff_tester.cpp)
+endif()
+
 set(SOURCE_FILES_OBJC )
 
 add_definitions(
@@ -140,6 +159,18 @@ add_definitions(
 
 # Required for the "EGL OpenGL contexts" test in mediastreamer2_player_tester.c and h26x tester.
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/../include/OpenGL" "${CMAKE_CURRENT_SOURCE_DIR}/../src/videofilters")
+
+if(ENABLE_BAUDOT)
+	list(APPEND SOURCE_FILES_CXX mediastreamer2_baudot_tester.cpp)
+	set_source_files_properties(mediastreamer2_baudot_tester.cpp PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+	list(APPEND SOUND_FILES
+		sounds/baudot_alphabet_silence.wav
+		sounds/baudot_mono_alphabet_letter_by_letter_us.wav
+		sounds/baudot_mono_alphabet_us.wav
+		sounds/baudot_mono_digits_us.wav
+		sounds/baudot_stereo_alphabet_us.wav
+	)
+endif()
 
 if(ENABLE_VIDEO)
 	list(APPEND SOURCE_FILES_C mediastreamer2_video_stream_tester.c)
@@ -201,7 +232,7 @@ elseif(NOT ANDROID)
 					MACOSX_BUNDLE_BUNDLE_NAME org.linphone.ms2.mediastreamer2-tester
 					MACOSX_BUNDLE_BUNDLE_VERSION 1.0
 					MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0")
-		
+
 	else()
 		add_executable(mediastreamer2-tester ${SOURCE_FILES_C} ${SOURCE_FILES_CXX} ${SOURCE_FILES_OBJC})
 	endif()

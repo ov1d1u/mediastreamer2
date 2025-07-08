@@ -111,6 +111,17 @@ void media_stream_remove_tmmbr_handler(MediaStream *stream,
                                        void (*on_tmmbr_received)(const OrtpEventData *evd, void *),
                                        void *user_data);
 
+/* The handler of goog-remb for MediaStream objects.*/
+void media_stream_goog_remb_received(const OrtpEventData *evd, void *user_pointer);
+
+void media_stream_add_goog_remb_handler(MediaStream *stream,
+                                        void (*on_goog_remb_received)(const OrtpEventData *evd, void *),
+                                        void *user_data);
+
+void media_stream_remove_goog_remb_handler(MediaStream *stream,
+                                           void (*on_goog_remb_received)(const OrtpEventData *evd, void *),
+                                           void *user_data);
+
 void media_stream_print_summary(MediaStream *ms);
 
 RtpSession *media_stream_rtp_session_new_from_session(RtpSession *session, int mode);
@@ -128,7 +139,7 @@ void video_stream_enable_recording(VideoStream *stream, bool_t enabled);
 void ms_audio_conference_set_video_conference(struct _MSAudioConference *audioconf,
                                               struct _MSVideoConference *videoconf);
 
-bool_t ms_path_ends_with(const char *path, const char *suffix);
+MS2_PUBLIC bool_t ms_path_ends_with(const char *path, const char *suffix);
 
 /*
  * Currently common to every h264 implementations including plugins

@@ -43,7 +43,6 @@ struct _MSZrtpContext {
 	    *rtp_modifier;           /**< transport modifier needed to be able to inject the ZRTP packet for sending */
 	bzrtpContext_t *zrtpContext; /**< the opaque zrtp context from libbzrtp */
 	/* cache related data */
-	uint32_t limeKeyTimeSpan;    /**< amount in seconds of the lime key life span */
 	void *cacheDB;               /**< pointer to an already open sqlite db holding the zid cache */
 	bctbx_mutex_t *cacheDBMutex; /**< pointer to a mutex used to lock cache access */
 	bool_t autoStart;            /*allow zrtp to start on first hello packet received*/
@@ -364,6 +363,12 @@ static int ms_zrtp_getAlgoId(uint8_t algo) {
 			return MS_ZRTP_KEY_AGREEMENT_K255;
 		case (ZRTP_KEYAGREEMENT_K448):
 			return MS_ZRTP_KEY_AGREEMENT_K448;
+		case (ZRTP_KEYAGREEMENT_MLK1):
+			return MS_ZRTP_KEY_AGREEMENT_MLK1;
+		case (ZRTP_KEYAGREEMENT_MLK2):
+			return MS_ZRTP_KEY_AGREEMENT_MLK2;
+		case (ZRTP_KEYAGREEMENT_MLK3):
+			return MS_ZRTP_KEY_AGREEMENT_MLK3;
 		case (ZRTP_KEYAGREEMENT_KYB1):
 			return MS_ZRTP_KEY_AGREEMENT_KYB1;
 		case (ZRTP_KEYAGREEMENT_KYB2):
@@ -376,10 +381,14 @@ static int ms_zrtp_getAlgoId(uint8_t algo) {
 			return MS_ZRTP_KEY_AGREEMENT_HQC2;
 		case (ZRTP_KEYAGREEMENT_HQC3):
 			return MS_ZRTP_KEY_AGREEMENT_HQC3;
+		case (ZRTP_KEYAGREEMENT_K255_MLK512):
+			return MS_ZRTP_KEY_AGREEMENT_K255_MLK512;
 		case (ZRTP_KEYAGREEMENT_K255_KYB512):
 			return MS_ZRTP_KEY_AGREEMENT_K255_KYB512;
 		case (ZRTP_KEYAGREEMENT_K255_HQC128):
 			return MS_ZRTP_KEY_AGREEMENT_K255_HQC128;
+		case (ZRTP_KEYAGREEMENT_K448_MLK1024):
+			return MS_ZRTP_KEY_AGREEMENT_K448_MLK1024;
 		case (ZRTP_KEYAGREEMENT_K448_KYB1024):
 			return MS_ZRTP_KEY_AGREEMENT_K448_KYB1024;
 		case (ZRTP_KEYAGREEMENT_K448_HQC256):
@@ -703,6 +712,15 @@ static void set_key_agreement_suites(bzrtpContext_t *ctx,
 			case MS_ZRTP_KEY_AGREEMENT_K448:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K448;
 				break;
+			case MS_ZRTP_KEY_AGREEMENT_MLK1:
+				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_MLK1;
+				break;
+			case MS_ZRTP_KEY_AGREEMENT_MLK2:
+				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_MLK2;
+				break;
+			case MS_ZRTP_KEY_AGREEMENT_MLK3:
+				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_MLK3;
+				break;
 			case MS_ZRTP_KEY_AGREEMENT_KYB1:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_KYB1;
 				break;
@@ -721,11 +739,17 @@ static void set_key_agreement_suites(bzrtpContext_t *ctx,
 			case MS_ZRTP_KEY_AGREEMENT_HQC3:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_HQC3;
 				break;
+			case MS_ZRTP_KEY_AGREEMENT_K255_MLK512:
+				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K255_MLK512;
+				break;
 			case MS_ZRTP_KEY_AGREEMENT_K255_KYB512:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K255_KYB512;
 				break;
 			case MS_ZRTP_KEY_AGREEMENT_K255_HQC128:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K255_HQC128;
+				break;
+			case MS_ZRTP_KEY_AGREEMENT_K448_MLK1024:
+				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K448_MLK1024;
 				break;
 			case MS_ZRTP_KEY_AGREEMENT_K448_KYB1024:
 				bzrtpKeyAgreements[bzrtpCount++] = ZRTP_KEYAGREEMENT_K448_KYB1024;
@@ -830,7 +854,6 @@ MSZrtpContext *ms_zrtp_context_new(MSMediaStreamSessions *sessions, MSZrtpParams
 	userData->stream_sessions = sessions;
 	userData->self_ssrc = sessions->rtp_session->snd.ssrc;
 
-	userData->limeKeyTimeSpan = params->limeKeyTimeSpan;
 	userData->cacheDB =
 	    params->zidCacheDB; /* add a link to the ZidCache and mutex to be able to access it from callbacks */
 	userData->cacheDBMutex = params->zidCacheDBMutex;
@@ -992,6 +1015,15 @@ uint8_t ms_zrtp_available_key_agreement(MSZrtpKeyAgreement algos[256]) {
 			case ZRTP_KEYAGREEMENT_EC52:
 				algos[count++] = MS_ZRTP_KEY_AGREEMENT_EC52;
 				break;
+			case ZRTP_KEYAGREEMENT_MLK1:
+				algos[count++] = MS_ZRTP_KEY_AGREEMENT_MLK1;
+				break;
+			case ZRTP_KEYAGREEMENT_MLK2:
+				algos[count++] = MS_ZRTP_KEY_AGREEMENT_MLK2;
+				break;
+			case ZRTP_KEYAGREEMENT_MLK3:
+				algos[count++] = MS_ZRTP_KEY_AGREEMENT_MLK3;
+				break;
 			case ZRTP_KEYAGREEMENT_KYB1:
 				algos[count++] = MS_ZRTP_KEY_AGREEMENT_KYB1;
 				break;
@@ -1013,8 +1045,14 @@ uint8_t ms_zrtp_available_key_agreement(MSZrtpKeyAgreement algos[256]) {
 			case ZRTP_KEYAGREEMENT_K255_KYB512:
 				algos[count++] = MS_ZRTP_KEY_AGREEMENT_K255_KYB512;
 				break;
+			case ZRTP_KEYAGREEMENT_K255_MLK512:
+				algos[count++] = MS_ZRTP_KEY_AGREEMENT_K255_MLK512;
+				break;
 			case ZRTP_KEYAGREEMENT_K255_HQC128:
 				algos[count++] = MS_ZRTP_KEY_AGREEMENT_K255_HQC128;
+				break;
+			case ZRTP_KEYAGREEMENT_K448_MLK1024:
+				algos[count++] = MS_ZRTP_KEY_AGREEMENT_K448_MLK1024;
 				break;
 			case ZRTP_KEYAGREEMENT_K448_KYB1024:
 				algos[count++] = MS_ZRTP_KEY_AGREEMENT_K448_KYB1024;
@@ -1069,7 +1107,7 @@ MSZrtpContext *ms_zrtp_multistream_new(MSMediaStreamSessions *sessions, MSZrtpCo
 	return NULL;
 }
 
-void ms_zrtp_enable_go_clear(MSZrtpContext *ctx, bool_t enable){};
+void ms_zrtp_enable_go_clear(MSZrtpContext *ctx, bool_t enable) {};
 
 int ms_zrtp_channel_start(MSZrtpContext *ctx) {
 	return 0;
@@ -1092,7 +1130,7 @@ MSZrtpPeerStatus ms_zrtp_get_peer_status(void *db, const char *peerUri, bctbx_mu
 void ms_zrtp_context_destroy(MSZrtpContext *ctx) {
 }
 
-void ms_zrtp_reset_transmition_timer(MSZrtpContext *ctx){};
+void ms_zrtp_reset_transmition_timer(MSZrtpContext *ctx) {};
 
 int ms_zrtp_transport_modifier_new(MSZrtpContext *ctx, RtpTransportModifier **rtpt, RtpTransportModifier **rtcpt) {
 	return 0;
@@ -1209,14 +1247,19 @@ MSZrtpKeyAgreement ms_zrtp_key_agreement_from_string(const char *str) {
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_X448);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K255);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K448);
+	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_MLK1);
+	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_MLK2);
+	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_MLK3);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_KYB1);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_KYB2);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_KYB3);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_HQC1);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_HQC2);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_HQC3);
+	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K255_MLK512);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K255_KYB512);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K255_HQC128);
+	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K448_MLK1024);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K448_KYB1024);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K448_HQC256);
 	STRING_COMPARE_RETURN(str, MS_ZRTP_KEY_AGREEMENT_K255_KYB512_HQC128);
@@ -1231,11 +1274,14 @@ const char *ms_zrtp_key_agreement_to_string(const MSZrtpKeyAgreement keyAgreemen
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_EC38); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_EC52);
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_X255); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_X448);
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K255); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448);
-	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB1); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB2);
-	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB3); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC1);
-	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC2); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC3);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_MLK1); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_MLK2);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_MLK3); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB1);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB2); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_KYB3);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC1); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC2);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_HQC3); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K255_MLK512);
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K255_KYB512); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K255_HQC128);
-	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_KYB1024); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_HQC256);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_MLK1024); CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_KYB1024);
+	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_HQC256);
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K255_KYB512_HQC128);
 	    CASE_RETURN_STRING(MS_ZRTP_KEY_AGREEMENT_K448_KYB1024_HQC256););
 }

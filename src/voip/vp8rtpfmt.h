@@ -122,13 +122,13 @@ typedef struct Vp8RtpFmtUnpackerCtx {
 
 typedef struct Vp8RtpFmtPackerCtx {
 	MSQueue *output_queue;
-	MSFactory *factory;
+	size_t max_payload_size;
 	uint16_t _refCSeq;
 } Vp8RtpFmtPackerCtx;
 
-void vp8rtpfmt_packer_init(Vp8RtpFmtPackerCtx *ctx);
+void vp8rtpfmt_packer_init(Vp8RtpFmtPackerCtx *ctx, size_t max_payload_size);
 void vp8rtpfmt_packer_uninit(Vp8RtpFmtPackerCtx *ctx);
-void vp8rtpfmt_packer_process(Vp8RtpFmtPackerCtx *ctx, MSList *in, MSQueue *out, MSFactory *f);
+void vp8rtpfmt_packer_process(Vp8RtpFmtPackerCtx *ctx, MSList *in, MSQueue *out);
 
 void vp8rtpfmt_unpacker_init(
     Vp8RtpFmtUnpackerCtx *ctx, MSFilter *f, bool_t avpf_enabled, bool_t freeze_on_error, bool_t output_partitions);
@@ -139,7 +139,7 @@ uint32_t vp8rtpfmt_unpacker_calc_extended_cseq(Vp8RtpFmtUnpackerCtx *ctx, uint16
 void vp8rtpfmt_send_rpsi(Vp8RtpFmtUnpackerCtx *ctx, uint16_t pictureid);
 
 /* Fast version that just skips the vp8 rtp payload header, and returns the start of the VP8 payload. */
-uint8_t *vp8rtpfmt_skip_payload_descriptor(mblk_t *m);
+uint8_t *vp8rtpfmt_skip_payload_descriptor(const mblk_t *m);
 
 #ifdef __cplusplus
 }

@@ -105,6 +105,7 @@ void mediastreamer2_tester_init(void (*ftester_printf)(int level, const char *fm
 	bc_tester_add_suite(&sound_card_test_suite);
 	bc_tester_add_suite(&adaptive_test_suite);
 	bc_tester_add_suite(&audio_stream_test_suite);
+	bc_tester_add_suite(&aec3_test_suite);
 #ifdef VIDEO_ENABLED
 	bc_tester_add_suite(&video_stream_test_suite);
 	bc_tester_add_suite(&h26x_tools_test_suite);
@@ -124,6 +125,12 @@ void mediastreamer2_tester_init(void (*ftester_printf)(int level, const char *fm
 	bc_tester_add_suite(&jitterbuffer_test_suite);
 #endif
 	bc_tester_add_suite(&double_encryption_test_suite);
+#ifdef HAVE_ZLIB
+	bc_tester_add_suite(&smff_test_suite);
+#endif
+#ifdef ENABLE_BAUDOT
+	bc_tester_add_suite(&baudot_test_suite);
+#endif
 }
 
 void mediastreamer2_tester_uninit(void) {

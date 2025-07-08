@@ -1,7 +1,7 @@
 ############################################################################
 # Copyright (c) 2010-2023 Belledonne Communications SARL.
 #
-# This file is part of mediastreamer2 
+# This file is part of mediastreamer2
 # (see https://gitlab.linphone.org/BC/public/mediastreamer2).
 #
 ############################################################################
@@ -44,7 +44,8 @@ set(BASE_SOURCE_FILES_C
 	otherfilters/tee.c
 	otherfilters/void.c
 )
-if(ANDROID)
+
+if(ANDROID OR ENABLE_JAVA_WRAPPER)
 	list(APPEND BASE_SOURCE_FILES_C utils/msjava.c)
 endif()
 
@@ -82,10 +83,8 @@ set(VOIP_SOURCE_FILES_C
 	audiofilters/msg722.c
 	audiofilters/msvaddtx.c
 	audiofilters/msvolume.c
-	audiofilters/tonedetector.c
 	audiofilters/ulaw.c
 	audiofilters/waveheader.h
-	crypto/dtls_srtp.c
 	crypto/zrtp.c
 	otherfilters/msrtp.c
 	utils/_kiss_fft_guts.h
@@ -128,9 +127,16 @@ set(VOIP_SOURCE_FILES_C
 	voip/private.h
 )
 set(VOIP_SOURCE_FILES_CXX
+	audiofilters/tonedetector.cpp
 	crypto/ms_srtp.cpp
+	crypto/dtls_srtp.cpp
 	utils/filter-wrapper/decoding-filter-wrapper.cpp
 	utils/filter-wrapper/encoding-filter-wrapper.cpp
+	utils/goertzel_state.cpp
+	videofilters/smff/recorder.cpp
+	videofilters/smff/player.cpp
+	videofilters/smff/smff.cpp
+	videofilters/smff/smff.h
 	videofilters/packet-router.cpp
 	voip/audiostreamvolumes.cpp
 	voip/turn_tcp.cpp
@@ -147,7 +153,8 @@ endif()
 if(ENABLE_ALSA)
 	list(APPEND VOIP_SOURCE_FILES_C audiofilters/alsa.c)
 endif()
-if(ANDROID)
+
+if(ANDROID OR ENABLE_JAVA_WRAPPER)
 	list(APPEND VOIP_SOURCE_FILES_CXX voip/msvoip_jni.cc)
 endif()
 if(ENABLE_ANDROIDSND)
@@ -200,6 +207,14 @@ if(IOS)
 	list(APPEND VOIP_SOURCE_FILES_OBJC audiofilters/msiounit.mm)
 endif()
 
+if(ENABLE_BAUDOT)
+	list(APPEND VOIP_SOURCE_FILES_CXX
+		baudot/baudot_decoding_context.cpp
+		baudot/baudot_detector_filter.cpp
+		baudot/baudot_encoding_context.cpp
+		baudot/baudot_generator_filter.cpp
+	)
+endif()
 if(ENABLE_G726)
 	list(APPEND VOIP_SOURCE_FILES_C audiofilters/g726.c)
 endif()
@@ -240,6 +255,7 @@ if(ENABLE_VIDEO)
 		videofilters/nowebcam.c
 		videofilters/pixconv.c
 		videofilters/sizeconv.c
+		videofilters/video-aggregator.c
 		videofilters/dummy_codec.c
 		voip/layouts.c
 		voip/layouts.h
@@ -502,34 +518,34 @@ add_custom_target(mediastreamer2-voipdescs-header
 
 
 if(APPLE OR ANDROID OR OPENGL_FOUND OR OpenGL_GLX_FOUND OR QtAngle_FOUND OR WIN32)
-	find_package(PythonInterp 3 REQUIRED)
+	find_package(Python3 REQUIRED)
 	find_program(SED_PROGRAM sed CMAKE_FIND_ROOT_PATH_BOTH)
 	if(NOT SED_PROGRAM)
 		message(FATAL_ERROR "You need the sed program to build mediastreamer2.")
 	endif()
 	add_custom_target(mediastreamer2-fragment-shader-header
-		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
+		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
 			-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
 			-DSOURCE_FILE="YCbCr_to_RGB.frag"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/generate_yuv2rgb_header.cmake"
 		BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/YCbCr_to_RGB.frag.h"
 	)
 	add_custom_target(mediastreamer2-vertex-shader-header
-		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
+		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
 			-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
 			-DSOURCE_FILE="screen_transform.vert"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/generate_yuv2rgb_header.cmake"
 		BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/screen_transform.vert.h"
 	)
 	add_custom_target(mediastreamer2-yuv2rgb-fs-header
-		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
+		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
 			-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
 			-DSOURCE_FILE="yuv2rgb.fs"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/generate_yuv2rgb_header.cmake"
 		BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/yuv2rgb.fs.h"
 	)
 	add_custom_target(mediastreamer2-yuv2rgb-vs-header
-		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${PYTHON_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
+		COMMAND ${CMAKE_COMMAND} -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE} -DSED_PROGRAM=${SED_PROGRAM}
 			-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
 			-DSOURCE_FILE="yuv2rgb.vs"
 			-P "${CMAKE_CURRENT_SOURCE_DIR}/generate_yuv2rgb_header.cmake"
@@ -608,6 +624,11 @@ if(BCMatroska2_FOUND)
 endif()
 if(BV16_FOUND AND BV16_USE_BUILD_INTERFACE)
 	target_compile_definitions(mediastreamer2 PRIVATE BV16_USE_BUILD_INTERFACE)
+endif()
+
+if(JNI_FOUND)
+	target_include_directories(mediastreamer2 PRIVATE ${JNI_INCLUDE_DIRS})
+	target_link_libraries(mediastreamer2 PRIVATE ${JNI_LIBRARIES})
 endif()
 
 if(BUILD_SHARED_LIBS)
@@ -693,6 +714,10 @@ if(BUILD_SHARED_LIBS)
 			set_property(TARGET mediastreamer2 PROPERTY POSITION_INDEPENDENT_CODE ON)
 		endif()
 	endif()
+
+else()
+
+	target_compile_definitions(mediastreamer2 PUBLIC "MS2_STATIC")
 
 endif()
 

@@ -32,6 +32,11 @@
 
 using namespace std;
 
+namespace {
+/* EKT message type as defined in RFC8870 - section 4.1 */
+const uint8_t EKT_MsgType_SHORT = 0x00;
+} // namespace
+
 namespace mediastreamer {
 
 class PackerRouterLogContextualizer {
@@ -65,11 +70,35 @@ private:
 RouterInput::RouterInput(PacketRouter *router, int inputNumber) : mRouter(router), mPin(inputNumber) {
 }
 
+void RouterInput::configure(const MSPacketRouterPinData *pinData) {
+	std::copy(std::begin(pinData->extension_ids), std::end(pinData->extension_ids), std::begin(mExtensionIds));
+}
+
 int RouterInput::getPin() const {
 	return mPin;
 }
 
+int RouterInput::getExtensionId(int defaultExtensionId) const {
+	return mExtensionIds[defaultExtensionId] > 0 ? mExtensionIds[defaultExtensionId] : defaultExtensionId;
+}
+
 RouterAudioInput::RouterAudioInput(PacketRouter *router, int inputNumber) : RouterInput(router, inputNumber) {
+}
+
+bool isRTCP(const uint8_t *packet) {
+	const uint8_t version = (packet[0] >> 6); // Version always 2.
+	const uint8_t packetType = packet[1];     // For RTCP, packetType indicates the type of report.
+
+	return (version == 2 && (packetType >= 72 && packetType <= 76));
+}
+
+bool queueContainsOnlyRtcp(MSQueue *queue) {
+	for (mblk_t *m = ms_queue_peek_first(queue); !ms_queue_end(queue, m); m = ms_queue_peek_next(queue, m)) {
+		if (!isRTCP(m->b_rptr)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void RouterAudioInput::update() {
@@ -81,12 +110,18 @@ void RouterAudioInput::update() {
 	// Reset this state for the upcoming selection
 	mNeedsToBeSent = false;
 
+	// Always send RTCP
+	if (queueContainsOnlyRtcp(queue)) {
+		mNeedsToBeSent = true;
+		return;
+	}
+
 	for (mblk_t *m = ms_queue_peek_first(queue); !ms_queue_end(queue, m); m = ms_queue_peek_next(queue, m)) {
 		mSsrc = rtp_get_ssrc(m);
 
 		bool_t voiceActivity = FALSE;
-		int newVolume =
-		    rtp_get_client_to_mixer_audio_level(m, RTP_EXTENSION_CLIENT_TO_MIXER_AUDIO_LEVEL, &voiceActivity);
+		int newVolume = rtp_get_client_to_mixer_audio_level(
+		    m, getExtensionId(RTP_EXTENSION_CLIENT_TO_MIXER_AUDIO_LEVEL), &voiceActivity);
 
 		if (newVolume != RTP_AUDIO_LEVEL_NO_VOLUME) {
 			newVolume = static_cast<int>(ms_volume_dbov_to_dbm0(newVolume));
@@ -100,11 +135,16 @@ void RouterAudioInput::update() {
 
 			// We are still muted
 			if (mVolume == MS_VOLUME_DB_MUTED && newVolume == MS_VOLUME_DB_MUTED) {
-				// Wait at least sMutedSentInterval before sending this information again
-				// This is only needed for participants that joins after an input is muted to make sure they know
-				if (const auto time = mRouter->getTime(); time - mLastMutedSentTime > sMutedSentInterval) {
-					mNeedsToBeSent = true;
-					mLastMutedSentTime = mRouter->getTime();
+				// Check if we have a short EKT tag (packet last byte is 0x00) when end to end ecryption is enabled.
+				// In that case, do not mark the packet to be sent, if the timer expired,
+				// we'll try again on the next one until we find a packet with a full EKT tag.
+				if (!mRouter->isEndToEndEncryptionEnabled() || m->b_rptr[msgdsize(m) - 1] != EKT_MsgType_SHORT) {
+					// Wait at least sMutedSentInterval before sending this information again
+					// This is only needed for participants that joins after an input is muted to make sure they know
+					if (const auto time = mRouter->getTime(); time - mLastMutedSentTime > sMutedSentInterval) {
+						mNeedsToBeSent = true;
+						mLastMutedSentTime = mRouter->getTime();
+					}
 				}
 			}
 
@@ -123,9 +163,9 @@ void RouterAudioInput::update() {
 RouterVideoInput::RouterVideoInput(PacketRouter *router,
                                    int inputNumber,
                                    const std::string &encoding,
-                                   bool fullPacketMode)
+                                   bool endToEndEcryption)
     : RouterInput(router, inputNumber) {
-	if (fullPacketMode) {
+	if (endToEndEcryption) {
 		mKeyFrameIndicator = make_unique<HeaderExtensionKeyFrameIndicator>();
 	} else if (encoding == "VP8") {
 		mKeyFrameIndicator = make_unique<VP8KeyFrameIndicator>();
@@ -136,6 +176,17 @@ RouterVideoInput::RouterVideoInput(PacketRouter *router,
 		PackerRouterLogContextualizer prlc(router);
 		ms_error("Trying to create a video input in AV1 while it is disabled");
 #endif
+	}
+}
+
+void RouterVideoInput::configure(const MSPacketRouterPinData *pinData) {
+	RouterInput::configure(pinData);
+
+	// If we have an HeaderExtensionKeyFrameIndicator, update the extension id.
+	if (auto headerExtensionKeyFrameIndicator =
+	        dynamic_cast<HeaderExtensionKeyFrameIndicator *>(mKeyFrameIndicator.get());
+	    headerExtensionKeyFrameIndicator != nullptr) {
+		headerExtensionKeyFrameIndicator->setFrameMarkingExtensionId(getExtensionId(RTP_EXTENSION_FRAME_MARKING));
 	}
 }
 
@@ -169,8 +220,8 @@ void RouterVideoInput::update() {
 
 		if (mKeyFrameRequested) {
 			if (!mSeqNumberSet || mCurrentTimestamp != newTimestamp) {
-				// Possibly a beginning of frame !
-				if (mKeyFrameIndicator->isKeyFrame(m)) {
+				// Possibly a beginning of frame!
+				if (isKeyFrame(m)) {
 					PackerRouterLogContextualizer prlc(mRouter);
 					ms_message("Key frame detected on pin %i", mPin);
 					mState = State::Running;
@@ -193,11 +244,32 @@ void RouterVideoInput::update() {
 		}
 	}
 }
+
+bool RouterVideoInput::isKeyFrame(mblk_t *packet) const {
+	// If full packet mode is enabled and end-to-end encryption is not, then we need to pass the payload to the key
+	// frame indicator since it will not check for header extension.
+	if (mRouter->isFullPacketModeEnabled() && !mRouter->isEndToEndEncryptionEnabled()) {
+		// Small hack to avoid duplicating the mblk_t packet since isKeyFrame only accepts a const.
+		mblk_t payload{};
+		rtp_get_payload(packet, &payload.b_rptr);
+		payload.b_wptr = packet->b_wptr;
+		payload.b_cont = packet->b_cont;
+
+		return mKeyFrameIndicator->isKeyFrame(&payload);
+	}
+
+	return mKeyFrameIndicator->isKeyFrame(packet);
+}
 #endif
 
 // =============================================================================
 
 RouterOutput::RouterOutput(PacketRouter *router, int pin) : mRouter(router), mPin(pin) {
+}
+
+void RouterOutput::configure(const MSPacketRouterPinData *pinData) {
+	mSelfSource = pinData->self;
+	std::copy(std::begin(pinData->extension_ids), std::end(pinData->extension_ids), std::begin(mExtensionIds));
 }
 
 void RouterOutput::rewritePacketInformation(mblk_t *source, mblk_t *output) {
@@ -215,10 +287,29 @@ void RouterOutput::rewritePacketInformation(mblk_t *source, mblk_t *output) {
 
 	// We need to set sequence number for what we send out, otherwise the decoder won't be able
 	// to verify the integrity of the stream
-
 	mblk_set_timestamp_info(output, mAdjustedOutTimestamp);
 	mblk_set_cseq(output, mOutSeqNumber++);
+
+	// Set flags as the source
 	mblk_set_marker_info(output, mblk_get_marker_info(source));
+	mblk_set_independent_flag(output, mblk_get_independent_flag(source));
+	mblk_set_discardable_flag(output, mblk_get_discardable_flag(source));
+}
+
+void RouterOutput::rewriteExtensionIds(mblk_t *output, int inputIds[16], int outputIds[16]) {
+	int mapping[16] = {};
+	bool mappingRequired = false;
+
+	// 0 is no extension and 15 is reserved by the RFC
+	for (int i = 1; i < 15; i++) {
+		if (inputIds[i] > 0 && outputIds[i] > 0 && inputIds[i] != outputIds[i]) {
+			// If any is not the same put it in the mapping array
+			mapping[inputIds[i]] = outputIds[i];
+			mappingRequired = true;
+		}
+	}
+
+	if (mappingRequired) rtp_remap_header_extension_ids(output, mapping);
 }
 
 RouterAudioOutput::RouterAudioOutput(PacketRouter *router, int pin) : RouterOutput(router, pin) {
@@ -249,6 +340,8 @@ void RouterAudioOutput::transfer() {
 
 						if (!mRouter->isFullPacketModeEnabled()) {
 							rewritePacketInformation(m, o);
+						} else {
+							rewriteExtensionIds(o, input->mExtensionIds, mExtensionIds);
 						}
 
 						ms_queue_put(outputQueue, o);
@@ -305,6 +398,8 @@ void RouterVideoOutput::transfer() {
 				// Only re-write packet information if full packet mode is disabled
 				if (!mRouter->isFullPacketModeEnabled()) {
 					rewritePacketInformation(m, o);
+				} else {
+					rewriteExtensionIds(o, input->mExtensionIds, mExtensionIds);
 				}
 
 				ms_queue_put(outputQueue, o);
@@ -527,9 +622,12 @@ void PacketRouter::process() {
 	}
 
 	// Flush the rest.
-	for (int i = 0; i < ROUTER_MAX_INPUT_CHANNELS; ++i) {
-		MSQueue *q = getInput(i);
-		if (q) ms_queue_flush(q);
+	for (size_t i = 0, j = 0; i < ROUTER_MAX_INPUT_CHANNELS && j < getConnectedInputsCount(); ++i) {
+		MSQueue *q = getInput((int)i);
+		if (q) {
+			ms_queue_flush(q);
+			j++;
+		}
 	}
 
 	unlock();
@@ -570,6 +668,14 @@ void PacketRouter::enableFullPacketMode(bool enable) {
 
 bool PacketRouter::isFullPacketModeEnabled() const {
 	return mFullPacketMode;
+}
+
+void PacketRouter::enableEndToEndEncryption(bool enable) {
+	mEndToEndEncryptionEnabled = enable;
+}
+
+bool PacketRouter::isEndToEndEncryptionEnabled() const {
+	return mEndToEndEncryptionEnabled;
 }
 
 RouterInput *PacketRouter::getRouterInput(int index) const {
@@ -668,6 +774,8 @@ void PacketRouter::configureOutput(const MSPacketRouterPinData *pinData) {
 
 	if (pinData->input != -1) {
 		createInputIfNotExists(pinData->input);
+
+		mInputs[pinData->input]->configure(pinData);
 	}
 
 	unlock();
@@ -807,7 +915,7 @@ void PacketRouter::createInputIfNotExists(int index) {
 			input = make_unique<RouterAudioInput>(this, index);
 		} else {
 #ifdef VIDEO_ENABLED
-			input = make_unique<RouterVideoInput>(this, index, mEncoding, mFullPacketMode);
+			input = make_unique<RouterVideoInput>(this, index, mEncoding, mEndToEndEncryptionEnabled);
 #endif
 		}
 
@@ -886,6 +994,15 @@ int PacketRouterFilterWrapper::onSetFullPacketModeEnabled(MSFilter *f, void *arg
 int PacketRouterFilterWrapper::onGetFullPacketModeEnabled(MSFilter *f, void *arg) {
 	try {
 		*static_cast<bool_t *>(arg) = static_cast<PacketRouter *>(f->data)->isFullPacketModeEnabled();
+		return 0;
+	} catch (const PacketRouter::MethodCallFailed &) {
+		return -1;
+	}
+}
+
+int PacketRouterFilterWrapper::onSetEndToEndEncryptionEnabled(MSFilter *f, void *arg) {
+	try {
+		static_cast<PacketRouter *>(f->data)->enableEndToEndEncryption(*static_cast<bool_t *>(arg));
 		return 0;
 	} catch (const PacketRouter::MethodCallFailed &) {
 		return -1;
@@ -1079,6 +1196,7 @@ static MSFilterMethod MS_FILTER_WRAPPER_METHODS_NAME(PacketRouter)[] = {
     {MS_PACKET_ROUTER_SET_ROUTING_MODE, PacketRouterFilterWrapper::onSetRoutingMode},
     {MS_PACKET_ROUTER_SET_FULL_PACKET_MODE_ENABLED, PacketRouterFilterWrapper::onSetFullPacketModeEnabled},
     {MS_PACKET_ROUTER_GET_FULL_PACKET_MODE_ENABLED, PacketRouterFilterWrapper::onGetFullPacketModeEnabled},
+    {MS_PACKET_ROUTER_SET_END_TO_END_ENCRYPTION_ENABLED, PacketRouterFilterWrapper::onSetEndToEndEncryptionEnabled},
     {MS_PACKET_ROUTER_CONFIGURE_OUTPUT, PacketRouterFilterWrapper::onConfigureOutput},
     {MS_PACKET_ROUTER_UNCONFIGURE_OUTPUT, PacketRouterFilterWrapper::onUnconfigureOutput},
     {MS_PACKET_ROUTER_SET_AS_LOCAL_MEMBER, PacketRouterFilterWrapper::onSetAsLocalMember},

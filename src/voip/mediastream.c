@@ -123,6 +123,7 @@ void media_stream_init(MediaStream *stream, MSFactory *factory, const MSMediaStr
 		ms_dtls_srtp_set_stream_sessions(sessions->dtls_context, &stream->sessions);
 	}
 	media_stream_add_tmmbr_handler(stream, media_stream_tmmbr_received, stream);
+	media_stream_add_goog_remb_handler(stream, media_stream_goog_remb_received, stream);
 	stream->stun_allowed = TRUE;
 	stream->transfer_mode = FALSE;
 }
@@ -146,14 +147,37 @@ void media_stream_remove_tmmbr_handler(MediaStream *stream,
 	                              (OrtpEvDispatcherCb)on_tmmbr_received);
 }
 
-static void on_ssrc_changed(RtpSession *session) {
+void media_stream_add_goog_remb_handler(MediaStream *stream,
+                                        void (*on_goog_remb_received)(const OrtpEventData *evd, void *),
+                                        void *user_data) {
+	ortp_ev_dispatcher_connect(stream->evd, ORTP_EVENT_RTCP_PACKET_RECEIVED, RTCP_PSFB,
+	                           (OrtpEvDispatcherCb)on_goog_remb_received, user_data);
+}
+
+void media_stream_remove_goog_remb_handler(MediaStream *stream,
+                                           void (*on_goog_remb_received)(const OrtpEventData *evd, void *),
+                                           BCTBX_UNUSED(void *user_data)) {
+	ortp_ev_dispatcher_disconnect(stream->evd, ORTP_EVENT_RTCP_PACKET_RECEIVED, RTCP_PSFB,
+	                              (OrtpEvDispatcherCb)on_goog_remb_received);
+}
+
+static void on_ssrc_changed(RtpSession *session,
+                            BCTBX_UNUSED(void *unused1),
+                            BCTBX_UNUSED(void *unused2),
+                            BCTBX_UNUSED(void *unused3)) {
 	ms_message("SSRC change detected !");
 	rtp_session_resync(session);
 }
-
+static void rtp_session_resync_cb(RtpSession *session,
+                                  BCTBX_UNUSED(void *unused1),
+                                  BCTBX_UNUSED(void *unused2),
+                                  BCTBX_UNUSED(void *unused3)) {
+	rtp_session_resync(session);
+}
 RtpSession *ms_create_duplex_rtp_session(const char *local_ip, int loc_rtp_port, int loc_rtcp_port, int mtu) {
 	RtpSession *rtpr;
 	const int socket_buf_size = 2000000;
+	int rtcp_interval;
 
 	rtpr = rtp_session_new(RTP_SESSION_SENDRECV);
 	rtp_session_set_recv_buf_size(rtpr, MAX(mtu, MS_MINIMAL_MTU));
@@ -171,12 +195,17 @@ RtpSession *ms_create_duplex_rtp_session(const char *local_ip, int loc_rtp_port,
 		}
 	}
 
-	rtp_session_signal_connect(rtpr, "timestamp_jump", (RtpCallback)rtp_session_resync, NULL);
+	rtp_session_signal_connect(rtpr, "timestamp_jump", (RtpCallback)rtp_session_resync_cb, NULL);
 	rtp_session_signal_connect(rtpr, "ssrc_changed", (RtpCallback)on_ssrc_changed, NULL);
 
 	rtp_session_set_ssrc_changed_threshold(rtpr, 0);
-	rtp_session_set_rtcp_report_interval(rtpr, 2500); /* At the beginning of the session send more reports. */
-	rtp_session_set_multicast_loopback(rtpr, TRUE);   /*very useful, specially for testing purposes*/
+	/* At the beginning of the session send more reports.
+	   The randomness part is for internal tests, to avoid simultaenous sending of RTCP
+	   report, which is unefficient for round trip delay computation.
+	*/
+	rtcp_interval = 2000 + (bctbx_random() % 1000);
+	rtp_session_set_rtcp_report_interval(rtpr, rtcp_interval);
+	rtp_session_set_multicast_loopback(rtpr, TRUE); /*very useful, specially for testing purposes*/
 	rtp_session_set_send_ts_offset(rtpr, (uint32_t)bctbx_random());
 	rtp_session_enable_avpf_feature(rtpr, ORTP_AVPF_FEATURE_TMMBR, TRUE);
 	disable_checksums(rtp_session_get_rtp_socket(rtpr));
@@ -256,6 +285,7 @@ void ms_media_stream_sessions_uninit(MSMediaStreamSessions *sessions) {
 
 void media_stream_free(MediaStream *stream) {
 	media_stream_remove_tmmbr_handler(stream, media_stream_tmmbr_received, stream);
+	media_stream_remove_goog_remb_handler(stream, media_stream_goog_remb_received, stream);
 
 	if (stream->sessions.zrtp_context != NULL) {
 		ms_zrtp_set_stream_sessions(stream->sessions.zrtp_context, NULL);
@@ -287,6 +317,7 @@ void media_stream_free(MediaStream *stream) {
 	if (stream->qi) ms_quality_indicator_destroy(stream->qi);
 	if (stream->fec_parameters != NULL) fec_params_destroy(stream->fec_parameters);
 	if (stream->log_tag) bctbx_free(stream->log_tag);
+	if (stream->last_goog_remb_received) freemsg(stream->last_goog_remb_received);
 }
 
 MSFactory *media_stream_get_factory(MediaStream *stream) {
@@ -986,6 +1017,66 @@ void media_stream_tmmbr_received(const OrtpEventData *evd, void *user_pointer) {
 	media_stream_process_tmmbr(ms, tmmbr_mxtbr);
 }
 
+static bool_t mediastream_goog_remb_equals(mblk_t *received, mblk_t *previous) {
+	const rtcp_fb_header_t *received_header = (rtcp_fb_header_t *)(received->b_rptr + sizeof(rtcp_common_header_t));
+	const rtcp_fb_header_t *previous_header = (rtcp_fb_header_t *)(previous->b_rptr + sizeof(rtcp_common_header_t));
+
+	if (received_header->packet_sender_ssrc != previous_header->packet_sender_ssrc) return FALSE;
+
+	const rtcp_fb_goog_remb_fci_t *received_fci = rtcp_PSFB_goog_remb_get_fci(received);
+	const rtcp_fb_goog_remb_fci_t *previous_fci = rtcp_PSFB_goog_remb_get_fci(previous);
+
+	if (received_fci->value != previous_fci->value) return FALSE;
+
+	const uint32_t *received_ssrcs = (uint32_t *)(received->b_rptr + sizeof(rtcp_common_header_t) +
+	                                              sizeof(rtcp_fb_header_t) + sizeof(rtcp_fb_goog_remb_fci_t));
+	const uint32_t *previous_ssrcs = (uint32_t *)(previous->b_rptr + sizeof(rtcp_common_header_t) +
+	                                              sizeof(rtcp_fb_header_t) + sizeof(rtcp_fb_goog_remb_fci_t));
+
+	// Since both goog-remb have the same value, then they have the same number of SSRCs
+	for (int i = 0; i < rtcp_fb_goog_remb_fci_get_num_ssrc(received_fci); ++i) {
+		if (received_ssrcs[i] != previous_ssrcs[i]) return FALSE;
+	}
+
+	return TRUE;
+}
+
+void media_stream_goog_remb_received(const OrtpEventData *evd, void *user_pointer) {
+	if (rtcp_PSFB_get_type(evd->packet) != RTCP_PSFB_AFB) return;
+
+	// Make sure we actually have a goog-remb
+	const rtcp_fb_goog_remb_fci_t *fci = rtcp_PSFB_goog_remb_get_fci(evd->packet);
+	if (fci == NULL || ntohl(fci->identifier) != 0x52454d42) return;
+
+	// And that this goog-remb is actually about us
+	if (rtcp_fb_goog_remb_fci_get_num_ssrc(fci) > 1) {
+		ms_warning("Received a goog-remb with more that 1 ssrc feedback, ignoring...");
+		return;
+	}
+
+	MediaStream *ms = (MediaStream *)user_pointer;
+	const uint32_t *ssrcs = (uint32_t *)(evd->packet->b_rptr + sizeof(rtcp_common_header_t) + sizeof(rtcp_fb_header_t) +
+	                                     sizeof(rtcp_fb_goog_remb_fci_t));
+	if (ntohl(ssrcs[0]) != media_stream_get_send_ssrc(ms)) {
+		ms_warning("Received a goog-remb for ssrc (%u) that is not for us, ignoring...", ntohl(ssrcs[0]));
+		return;
+	}
+
+	// If we received the same goog-remb ignore it
+	if (ms->last_goog_remb_received != NULL) {
+		if (mediastream_goog_remb_equals(evd->packet, ms->last_goog_remb_received)) return;
+
+		freemsg(ms->last_goog_remb_received);
+	}
+
+	// Store it for next comparison
+	ms->last_goog_remb_received = copymsg(evd->packet);
+
+	// Process as a TMMBR
+	uint64_t tmmbr_mxtbr = rtcp_PSFB_goog_remb_get_max_bitrate(evd->packet);
+	media_stream_process_tmmbr(ms, tmmbr_mxtbr);
+}
+
 void media_stream_print_summary(MediaStream *ms) {
 	ms_message("MediaStream[%p] (%s) with RtpSession[%p] summary:", ms, ms_format_type_to_string(ms->type),
 	           ms->sessions.rtp_session);
@@ -1044,6 +1135,15 @@ RtpSession *media_stream_rtp_session_new_from_session(RtpSession *session, int m
 	return s;
 }
 
+static void generate_unique_id(char *buffer, size_t buffer_size) {
+	if (buffer_size < 1) return;
+
+	for (size_t i = 0; i < buffer_size - 1; i++) {
+		buffer[i] = (char)(bctbx_random() % 26 + 'a');
+	}
+	buffer[buffer_size - 1] = '\0';
+}
+
 void media_stream_on_outgoing_ssrc_in_bundle(RtpSession *session, void *mp, void *s, void *userData) {
 	mblk_t *m = (mblk_t *)mp;
 	uint32_t ssrc = rtp_get_ssrc(m);
@@ -1068,13 +1168,15 @@ void media_stream_on_outgoing_ssrc_in_bundle(RtpSession *session, void *mp, void
 		sMid = bctbx_malloc0(midSize + 1);
 		memcpy(sMid, mid, midSize);
 		/* Check the mid in packet matches the stream's session one */
-		const char *streamMid = rtp_bundle_get_session_mid(session->bundle, ms->sessions.rtp_session);
+		char *streamMid = rtp_bundle_get_session_mid(session->bundle, ms->sessions.rtp_session);
 		if ((strlen(streamMid) != midSize) || (memcmp(mid, streamMid, midSize) != 0)) {
 			ms_warning("New outgoing SSRC %u on session %p but packet Mid %s differs from session mid %s", ssrc,
 			           session, sMid, streamMid);
+			bctbx_free(streamMid);
 			bctbx_free(sMid);
 			return;
 		}
+		if (streamMid != NULL) bctbx_free(streamMid);
 	}
 
 	if (*newSession != NULL) {
@@ -1086,6 +1188,11 @@ void media_stream_on_outgoing_ssrc_in_bundle(RtpSession *session, void *mp, void
 	*newSession = media_stream_rtp_session_new_from_session(ms->sessions.rtp_session, RTP_SESSION_SENDONLY);
 	ms_message("New outgoing SSRC %u on session %p detected, create a new session %p", ssrc, session, *newSession);
 	rtp_session_enable_transfer_mode(*newSession, TRUE); // relay rtp session is in transfer mode
+
+	char cname[20];
+	generate_unique_id(cname, sizeof(cname));
+	rtp_session_set_source_description(*newSession, cname, NULL, NULL, NULL, NULL, "oRTP", NULL);
+
 	bctbx_free(sMid);
 
 	/* keep track of newly created session */
@@ -1120,34 +1227,37 @@ FecParams *media_stream_extract_fec_params(const PayloadType *fec_payload_type) 
 }
 
 void media_stream_create_or_update_fec_session(MediaStream *ms) {
+	if (ms->sessions.rtp_session->bundle == NULL) return;
 
 	RtpProfile *profile = rtp_session_get_send_profile(ms->sessions.rtp_session);
-	PayloadType *fec_payload_type = rtp_profile_get_payload_from_mime(profile, "flexfec");
-	if (!fec_payload_type) return;
-	if (!ms->sessions.rtp_session->bundle) return;
+	const PayloadType *fec_payload_type = rtp_profile_get_payload_from_mime(profile, "flexfec");
+	if (fec_payload_type == NULL) return;
 
-	if (!ms->sessions.fec_session) {
-		int payload_type_number = 0;
+	char *mid = rtp_bundle_get_session_mid(ms->sessions.rtp_session->bundle, ms->sessions.rtp_session);
+	if (mid == NULL) return;
+
+	if (ms->sessions.fec_session == NULL) {
 		RtpSession *fec_session = rtp_session_new(RTP_SESSION_SENDRECV);
 		rtp_session_set_scheduling_mode(fec_session, 0);
 		rtp_session_set_blocking_mode(fec_session, 0);
 		rtp_session_enable_rtcp(fec_session, TRUE);
 		rtp_session_set_rtcp_report_interval(fec_session, 2500);
 		rtp_session_enable_avpf_feature(fec_session, ORTP_AVPF_FEATURE_TMMBR, TRUE);
-		rtp_session_set_profile(fec_session, profile);
-		payload_type_number = rtp_profile_get_payload_number_from_mime(profile, "flexfec");
-		rtp_session_set_payload_type(fec_session, payload_type_number);
 		fec_session->fec_stream = NULL;
 		ms->sessions.fec_session = fec_session;
 	} else {
 		rtp_session_reset_stats(ms->sessions.fec_session);
 	}
 
-	rtp_bundle_add_fec_session(ms->sessions.rtp_session->bundle, ms->sessions.rtp_session, ms->sessions.fec_session);
+	rtp_session_set_profile(ms->sessions.fec_session, profile);
+	int payload_type_number = rtp_profile_get_payload_number_from_mime(profile, "flexfec");
+	rtp_session_set_payload_type(ms->sessions.fec_session, payload_type_number);
+	rtp_bundle_add_session(ms->sessions.rtp_session->bundle, mid, ms->sessions.fec_session);
 	ms->fec_parameters = media_stream_extract_fec_params(fec_payload_type);
 	ms->fec_stream = fec_stream_new(ms->sessions.rtp_session, ms->sessions.fec_session, ms->fec_parameters);
 	ms_message("create or update FEC session [%p] with new FEC stream [%p], related to rtp_session [%p] in bundle [%p]",
 	           ms->sessions.fec_session, ms->fec_stream, ms->sessions.rtp_session, ms->sessions.rtp_session->bundle);
+	bctbx_free(mid);
 }
 
 void media_stream_destroy_fec_stream(MediaStream *ms) {

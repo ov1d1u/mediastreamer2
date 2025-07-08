@@ -45,9 +45,11 @@ public:
 	RouterInput(PacketRouter *router, int pin);
 	virtual ~RouterInput() = default;
 
+	virtual void configure(const MSPacketRouterPinData *pinData);
 	virtual void update() = 0;
 
 	int getPin() const;
+	int getExtensionId(int defaultExtensionId) const;
 
 protected:
 	PacketRouter *mRouter;
@@ -58,6 +60,8 @@ protected:
 	bool mSeqNumberSet = false;
 
 	bool mLocal = false;
+
+	int mExtensionIds[16] = {};
 };
 
 class RouterAudioInput : public RouterInput {
@@ -90,13 +94,15 @@ class RouterVideoInput : public RouterInput {
 	friend class RouterInputVideoSelector;
 
 public:
-	RouterVideoInput(PacketRouter *router, int pin, const std::string &encoding, bool fullPacketMode);
+	RouterVideoInput(PacketRouter *router, int pin, const std::string &encoding, bool endToEndEcryption);
 
+	void configure(const MSPacketRouterPinData *pinData) override;
 	void update() override;
 
 protected:
-	enum State { Stopped, Running };
+	bool isKeyFrame(mblk_t *packet) const;
 
+	enum State { Stopped, Running };
 	State mState = State::Stopped;
 
 	std::unique_ptr<KeyFrameIndicator> mKeyFrameIndicator = nullptr;
@@ -115,9 +121,7 @@ public:
 	RouterOutput(PacketRouter *router, int pin);
 	virtual ~RouterOutput() = default;
 
-	virtual void configure(const MSPacketRouterPinData *pinData) {
-		mSelfSource = pinData->self;
-	};
+	virtual void configure(const MSPacketRouterPinData *pinData);
 	virtual void transfer() = 0;
 
 	int getSelfSource() const {
@@ -126,6 +130,7 @@ public:
 
 protected:
 	void rewritePacketInformation(mblk_t *source, mblk_t *output);
+	void rewriteExtensionIds(mblk_t *output, int inputIds[16], int outputIds[16]);
 
 	PacketRouter *mRouter;
 
@@ -136,6 +141,8 @@ protected:
 	uint32_t mAdjustedOutTimestamp = 0;
 
 	uint16_t mOutSeqNumber = 0;
+
+	int mExtensionIds[16] = {};
 };
 
 class RouterAudioOutput : public RouterOutput {
@@ -237,6 +244,9 @@ public:
 	void enableFullPacketMode(bool enable);
 	bool isFullPacketModeEnabled() const;
 
+	void enableEndToEndEncryption(bool enable);
+	bool isEndToEndEncryptionEnabled() const;
+
 	RouterInput *getRouterInput(int index) const;
 	RouterOutput *getRouterOutput(int index) const;
 
@@ -279,6 +289,7 @@ protected:
 
 	RoutingMode mRoutingMode = RoutingMode::Unknown;
 	bool mFullPacketMode = false;
+	bool mEndToEndEncryptionEnabled = false;
 
 	std::unique_ptr<RouterInputSelector> mSelector = nullptr;
 
@@ -299,6 +310,7 @@ public:
 	static int onSetRoutingMode(MSFilter *f, void *arg);
 	static int onSetFullPacketModeEnabled(MSFilter *f, void *arg);
 	static int onGetFullPacketModeEnabled(MSFilter *f, void *arg);
+	static int onSetEndToEndEncryptionEnabled(MSFilter *f, void *arg);
 
 	static int onConfigureOutput(MSFilter *f, void *arg);
 	static int onUnconfigureOutput(MSFilter *f, void *arg);

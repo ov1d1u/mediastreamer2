@@ -26,11 +26,13 @@
 #include <bctoolbox/list.h>
 #include <jni.h>
 
+#include "mediastreamer2/mscommon.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void ms_set_jvm(JavaVM *vm);
+MS2_PUBLIC void ms_set_jvm(JavaVM *vm);
 void ms_set_gJvm(JavaVM *vm);
 JavaVM *ms_get_gJvm();
 void ms_set_gClassLoader(jobject _gClassLoader);
@@ -38,9 +40,9 @@ jobject ms_get_gClassLoader(void);
 void ms_set_gFindClassMethod(jmethodID _gFindClassMethod);
 jmethodID ms_get_gFindClassMethod(void);
 
-JavaVM *ms_get_jvm(void);
+MS2_PUBLIC JavaVM *ms_get_jvm(void);
 
-JNIEnv *ms_get_jni_env(void);
+MS2_PUBLIC JNIEnv *ms_get_jni_env(void);
 
 #ifdef __ANDROID__
 int ms_get_android_sdk_version(void);

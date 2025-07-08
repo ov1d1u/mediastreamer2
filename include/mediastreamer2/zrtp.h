@@ -76,6 +76,9 @@ typedef enum _MSZrtpAuthTag {
 
 typedef enum _MSZrtpKeyAgreement {
 	MS_ZRTP_KEY_AGREEMENT_INVALID,
+	MS_ZRTP_KEY_AGREEMENT_MLK1,
+	MS_ZRTP_KEY_AGREEMENT_MLK2,
+	MS_ZRTP_KEY_AGREEMENT_MLK3,
 	MS_ZRTP_KEY_AGREEMENT_KYB1,
 	MS_ZRTP_KEY_AGREEMENT_KYB2,
 	MS_ZRTP_KEY_AGREEMENT_KYB3,
@@ -91,8 +94,10 @@ typedef enum _MSZrtpKeyAgreement {
 	MS_ZRTP_KEY_AGREEMENT_K255,
 	MS_ZRTP_KEY_AGREEMENT_X448,
 	MS_ZRTP_KEY_AGREEMENT_K448,
+	MS_ZRTP_KEY_AGREEMENT_K255_MLK512,
 	MS_ZRTP_KEY_AGREEMENT_K255_KYB512,
 	MS_ZRTP_KEY_AGREEMENT_K255_HQC128,
+	MS_ZRTP_KEY_AGREEMENT_K448_MLK1024,
 	MS_ZRTP_KEY_AGREEMENT_K448_KYB1024,
 	MS_ZRTP_KEY_AGREEMENT_K448_HQC256,
 	MS_ZRTP_KEY_AGREEMENT_K255_KYB512_HQC128,
@@ -112,8 +117,7 @@ typedef struct MSZrtpParams {
 	bctbx_mutex_t *zidCacheDBMutex; /**< pointer to a mutex used to lock cache access */
 	const char *selfUri;            /* our sip URI, needed for zrtp Cache */
 	const char *peerUri;            /* the sip URI of correspondant, needed for zrtp Cache */
-	uint32_t limeKeyTimeSpan; /**< amount in seconds of the lime key life span, set to 0 for infinite life span **/
-	bool_t autoStart;         /*allow zrtp to start on first hello packet received*/
+	bool_t autoStart;               /*allow zrtp to start on first hello packet received*/
 	bool_t acceptGoClear;
 
 	/* activated crypto types */
